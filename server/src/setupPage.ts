@@ -190,6 +190,48 @@ export function renderSetupPage(options: SetupPageOptions): string {
       display: grid;
       gap: 18px;
     }
+    .qr-wrap {
+      display: grid;
+      gap: 12px;
+      justify-items: center;
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(4, 10, 18, 0.55);
+      border: 1px solid rgba(161, 205, 255, 0.12);
+    }
+    #qr {
+      display: grid;
+      place-items: center;
+      width: 220px;
+      min-height: 220px;
+      padding: 12px;
+      border-radius: 18px;
+      background: #f4f7fb;
+      box-sizing: border-box;
+    }
+    #qr canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 10px;
+    }
+    .micro {
+      margin: 0;
+      font-size: 12px;
+      color: #a9c0d8;
+      text-align: center;
+    }
+    .done {
+      display: none;
+      border-radius: 14px;
+      padding: 12px 14px;
+      background: rgba(136, 255, 184, 0.1);
+      border: 1px solid rgba(136, 255, 184, 0.24);
+      color: #c8ffd9;
+    }
+    .done.show {
+      display: block;
+    }
     .steps {
       display: grid;
       gap: 10px;
@@ -208,12 +250,16 @@ export function renderSetupPage(options: SetupPageOptions): string {
     }
     @media (min-width: 780px) {
       .success-grid {
-        grid-template-columns: minmax(0, 1fr);
+        grid-template-columns: minmax(0, 1.3fr) minmax(220px, 0.7fr);
       }
     }
     @media (max-width: 779px) {
       h1 { font-size: 28px; }
       .card { padding: 22px; border-radius: 20px; }
+      #qr {
+        width: min(220px, 100%);
+        min-height: 0;
+      }
     }
     @keyframes rise-in {
       from { opacity: 0; transform: translateY(14px) scale(0.98); }
@@ -252,6 +298,7 @@ export function renderSetupPage(options: SetupPageOptions): string {
           <div class="stack">
             <div class="row">
               <a id="open" class="cta" href="#">Open in Obsidian</a>
+              <button id="mark-ready" class="ghost" type="button">I scanned it</button>
             </div>
             <div class="row">
               <a class="ghost" href="${releaseZipUrl}">Download plugin zip</a>
@@ -283,21 +330,32 @@ export function renderSetupPage(options: SetupPageOptions): string {
               <button id="copy-token" class="ghost" type="button">Copy token</button>
               <button id="copy-link" class="ghost" type="button">Copy link</button>
             </div>
+            <div id="done" class="done" aria-live="polite"></div>
+          </div>
+          <div class="qr-wrap">
+            <div id="qr" aria-label="YAOS setup QR code"></div>
+            <p class="micro">Scan this on another device to open the same YAOS setup link in Obsidian.</p>
           </div>
         </div>
       </div>
     </div>
   </main>
+  <script src="https://cdn.jsdelivr.net/npm/qrious@4.0.2/dist/qrious.min.js"></script>
   <script>
     const cardEl = document.querySelector(".card");
     const claimButton = document.getElementById("claim");
     const statusEl = document.getElementById("status");
     const successEl = document.getElementById("success");
+    const heroTitleEl = document.getElementById("hero-title");
+    const heroCopyEl = document.getElementById("hero-copy");
     const tokenEl = document.getElementById("token");
     const pairEl = document.getElementById("pair");
     const openEl = document.getElementById("open");
+    const markReadyEl = document.getElementById("mark-ready");
     const copyTokenEl = document.getElementById("copy-token");
     const copyLinkEl = document.getElementById("copy-link");
+    const qrEl = document.getElementById("qr");
+    const doneEl = document.getElementById("done");
 
     function randomToken() {
       const bytes = new Uint8Array(32);
@@ -308,6 +366,31 @@ export function renderSetupPage(options: SetupPageOptions): string {
     async function copy(text) {
       await navigator.clipboard.writeText(text);
       statusEl.textContent = "Copied to clipboard.";
+    }
+
+    function renderQr(text) {
+      if (!text || !qrEl || !window.QRious) {
+        return;
+      }
+      qrEl.textContent = "";
+      const canvas = document.createElement("canvas");
+      qrEl.appendChild(canvas);
+      new window.QRious({
+        element: canvas,
+        value: text,
+        size: 196,
+        level: "M",
+        foreground: "#08111d",
+        background: "#f4f7fb",
+      });
+    }
+
+    function showReadyState(message) {
+      heroTitleEl.textContent = "YAOS is ready";
+      heroCopyEl.textContent = "Server claimed and running. You can close this tab.";
+      doneEl.textContent = message;
+      doneEl.classList.add("show");
+      statusEl.textContent = "YAOS is ready. You can close this tab.";
     }
 
     claimButton.addEventListener("click", async () => {
@@ -332,7 +415,8 @@ export function renderSetupPage(options: SetupPageOptions): string {
         successEl.classList.add("show");
         cardEl.classList.add("claimed");
         claimButton.closest(".hero-actions").style.display = "none";
-        statusEl.textContent = "Server claimed. Open the link in Obsidian, or copy it for another device.";
+        renderQr(data.obsidianUrl || "");
+        statusEl.textContent = "Server claimed. Open the link in Obsidian, or scan the QR code on another device.";
       } catch (error) {
         statusEl.textContent = "Claim failed: " + (error && error.message ? error.message : String(error));
         claimButton.disabled = false;
@@ -340,6 +424,12 @@ export function renderSetupPage(options: SetupPageOptions): string {
     });
     copyTokenEl.addEventListener("click", () => copy(tokenEl.value));
     copyLinkEl.addEventListener("click", () => copy(pairEl.value));
+    openEl.addEventListener("click", () => {
+      showReadyState("Obsidian should open now. If it did, you can close this tab.");
+    });
+    markReadyEl.addEventListener("click", () => {
+      showReadyState("This server is paired. You can close this tab whenever you're done.");
+    });
   </script>
 </body>
 </html>`;
