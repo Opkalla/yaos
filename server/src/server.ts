@@ -13,6 +13,7 @@ const LAST_SNAPSHOT_DAY_KEY = "lastSnapshotDay";
 const LAST_SNAPSHOT_ID_KEY = "lastSnapshotId";
 const DEBUG_TRACE_RING_KEY = "debugTraceRing";
 const MAX_DEBUG_TRACE_EVENTS = 200;
+const MAX_BLOB_UPLOAD_BYTES = 10 * 1024 * 1024; // Matches the default 10 MB client attachment limit.
 
 interface ServerTraceEntry {
 	ts: string;
@@ -24,11 +25,21 @@ interface ServerTraceEntry {
 	[key: string]: unknown;
 }
 
+function getHttpAuthToken(req: Party.Request): string | null {
+	const auth = req.headers.get("Authorization");
+	if (auth?.startsWith("Bearer ")) {
+		const token = auth.slice("Bearer ".length).trim();
+		if (token) return token;
+	}
+	return null;
+}
+
 /**
  * PartyKit server for vault CRDT sync.
  *
  * - One room per vault: roomId = "v1:<vaultId>"
- * - Auth: ?token= query param compared to env SYNC_TOKEN
+ * - Auth: WebSocket uses ?token=; HTTP prefers Authorization: Bearer
+ *   (with query-param fallback during rollout), compared to env SYNC_TOKEN
  * - Persistence: y-partykit snapshot mode (survives room hibernation)
  * - Hibernation: enabled for cost/scalability
  * - Blob endpoints: presign PUT/GET/exists for R2 attachment storage
@@ -149,7 +160,7 @@ export default class VaultSyncServer implements Party.Server {
 	async onRequest(req: Party.Request): Promise<Response> {
 		const url = new URL(req.url);
 		const path = url.pathname;
-		const token = url.searchParams.get("token");
+		const token = getHttpAuthToken(req) ?? url.searchParams.get("token");
 		const expected = this.room.env.SYNC_TOKEN as string | undefined;
 		const clientTrace = {
 			traceId: url.searchParams.get("trace") ?? undefined,
@@ -162,7 +173,8 @@ export default class VaultSyncServer implements Party.Server {
 			path,
 		}, clientTrace);
 
-		// Auth: same token-based auth as WebSocket
+		// Prefer Authorization headers for HTTP requests; keep ?token= as a
+		// compatibility fallback while older plugin builds roll forward.
 
 		if (!expected || !token || token !== expected) {
 			await this.recordTrace("http-unauthorized", {
@@ -252,6 +264,11 @@ export default class VaultSyncServer implements Party.Server {
 		}
 		if (!contentLength || typeof contentLength !== "number" || contentLength <= 0) {
 			return json({ error: "invalid contentLength" }, 400);
+		}
+		if (!Number.isFinite(contentLength) || contentLength > MAX_BLOB_UPLOAD_BYTES) {
+			return json({
+				error: `contentLength exceeds max upload size (${MAX_BLOB_UPLOAD_BYTES} bytes)`,
+			}, 413);
 		}
 
 		try {

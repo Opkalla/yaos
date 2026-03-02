@@ -8,7 +8,7 @@ PartyKit server for the Obsidian vault sync plugin. Relays Yjs CRDT updates betw
 - **Yjs sync**: [y-partykit](https://docs.partykit.io/reference/y-partykit-api/) handles the sync protocol
 - **Persistence**: Durable Object snapshot mode (survives hibernation and restarts)
 - **Hibernation**: Enabled — idle rooms use no compute
-- **Auth**: Token passed as `?token=` query param, compared to `SYNC_TOKEN` env var
+- **Auth**: WebSocket uses `?token=`; HTTP endpoints use `Authorization: Bearer <token>`
 - **Blobs**: Presigned R2 URLs for attachment upload/download (optional)
 - **Snapshots**: CRDT state backups stored in R2 (optional)
 
@@ -140,7 +140,8 @@ For PartyKit managed hosting, R2 integration requires deploying to your own acco
 
 ## Endpoints
 
-All endpoints require `?token=<SYNC_TOKEN>`.
+WebSocket connections require `?token=<SYNC_TOKEN>`.
+HTTP endpoints require `Authorization: Bearer <SYNC_TOKEN>`.
 
 ### WebSocket
 - `wss://<host>/parties/main/v1:<vaultId>` — Yjs sync connection
@@ -179,7 +180,7 @@ No grace period — old token stops working immediately on deploy.
 
 ### Security notes
 
-- Always use HTTPS in production (token is in query string)
+- Always use HTTPS in production
 - The plugin warns if connecting over unencrypted HTTP to non-localhost
 - `http://127.0.0.1` for local dev is fine
 - Compromised token = full read/write access to synced vault content
