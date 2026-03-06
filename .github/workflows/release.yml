@@ -43,4 +43,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            yaos.zip
+            yaos.zip \
+            main.js \
+            manifest.json \
+            styles.css
