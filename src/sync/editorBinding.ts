@@ -21,8 +21,13 @@ import type { TraceRecord } from "../debug/trace";
  * Freshly reconfigured editors can briefly report no ySyncFacet even though
  * the compartment update is still settling into the live view state.
  */
-const BINDING_SETTLE_WINDOW_MS = 250;
-const POST_BIND_HEALTH_CHECK_DELAY_MS = BINDING_SETTLE_WINDOW_MS + 50;
+const BASE_BINDING_SETTLE_WINDOW_MS = 750;
+const FAST_SWITCH_BINDING_SETTLE_WINDOW_MS = 1600;
+const FAST_SWITCH_WINDOW_MS = 2000;
+const POST_BIND_HEALTH_GRACE_MS = 100;
+const LIVE_UPDATE_HEALTH_RETRY_DELAY_MS = 120;
+const CM_RESOLVE_RETRY_DELAY_MS = 80;
+const CM_RESOLVE_MAX_RETRIES = 2;
 
 /** Map from MarkdownView instance id to its binding state. */
 interface EditorBinding {
@@ -35,6 +40,7 @@ interface EditorBinding {
 	lastBoundAt: string;
 	lastBoundAtMs: number;
 	lastEditorChangeAtMs: number;
+	settleWindowMs: number;
 }
 
 export interface BindingDebugInfo {
@@ -94,6 +100,8 @@ export class EditorBindingManager {
 	private healthWorkInFlight = new Set<string>();
 	private lastDeviceName = "unknown";
 	private cmDegradedWarned = false;
+	private cmResolveAttempts = new Map<string, number>();
+	private pendingCmResolveRetries = new Map<string, ReturnType<typeof setTimeout>>();
 
 	private readonly debug: boolean;
 
@@ -143,15 +151,16 @@ export class EditorBindingManager {
 		// Only bind .md files
 		if (!file.path.endsWith(".md")) return;
 
+		const leafId = (view.leaf as unknown as { id: string }).id ?? file.path;
 		const cm = this.getCmView(view);
 		if (!cm) {
 			this.log(`bind: no CM EditorView for "${file.path}"`);
-			this.warnCmDegraded();
+			this.scheduleCmResolveRetry(view, deviceName, leafId, "bind");
 			return;
 		}
+		this.clearCmResolveRetry(leafId);
 		this.cmDegradedWarned = false;
 		const cmId = this.getCmId(cm);
-		const leafId = (view.leaf as unknown as { id: string }).id ?? file.path;
 		const existing = this.bindings.get(leafId);
 
 		if (existing && existing.path === file.path && existing.cm === cm) {
@@ -225,15 +234,16 @@ export class EditorBindingManager {
 		if (!file) return false;
 		if (!file.path.endsWith(".md")) return false;
 
+		const leafId = (view.leaf as unknown as { id: string }).id ?? file.path;
 		const cm = this.getCmView(view);
 		if (!cm) {
 			this.log(`repair: no CM EditorView for "${file.path}"`);
-			this.warnCmDegraded();
-			return false;
+			this.scheduleCmResolveRetry(view, deviceName, leafId, `repair:${reason}`);
+			return true;
 		}
+		this.clearCmResolveRetry(leafId);
 		this.cmDegradedWarned = false;
 
-		const leafId = (view.leaf as unknown as { id: string }).id ?? file.path;
 		const existing = this.bindings.get(leafId);
 		if (!existing) {
 			this.log(
@@ -334,6 +344,7 @@ export class EditorBindingManager {
 		if (!binding) return;
 
 		this.clearScheduledHealthCheck(leafId);
+		this.clearCmResolveRetry(leafId);
 		this.healthWorkInFlight.delete(leafId);
 		binding.undoManager.destroy();
 		this.bindings.delete(leafId);
@@ -358,6 +369,7 @@ export class EditorBindingManager {
 	unbindAll(): void {
 		for (const [leafId, binding] of this.bindings) {
 			this.clearScheduledHealthCheck(leafId);
+			this.clearCmResolveRetry(leafId);
 			this.healthWorkInFlight.delete(leafId);
 			this.cmToLeafId.delete(binding.cm);
 			binding.undoManager.destroy();
@@ -374,6 +386,7 @@ export class EditorBindingManager {
 		for (const [leafId, binding] of this.bindings) {
 			if (binding.path === path) {
 				this.clearScheduledHealthCheck(leafId);
+				this.clearCmResolveRetry(leafId);
 				this.healthWorkInFlight.delete(leafId);
 				binding.undoManager.destroy();
 				try {
@@ -520,7 +533,7 @@ export class EditorBindingManager {
 				yTextMatchesExpected: null,
 				undoManagerMatchesFacet: null,
 				facetFileId: null,
-				expectedFileId: this.vaultSync.pathToId.get(file.path) ?? null,
+				expectedFileId: this.vaultSync.getFileId(file.path) ?? null,
 				facetTextLength: null,
 				cmDocLength: null,
 			};
@@ -542,7 +555,7 @@ export class EditorBindingManager {
 		const binding = this.bindings.get(leafId);
 		const expectedText = this.vaultSync.getTextForPath(file.path);
 		const expectedFileId =
-			this.vaultSync.pathToId.get(file.path)
+			this.vaultSync.getFileId(file.path)
 			?? (expectedText ? this.vaultSync.getFileIdForText(expectedText) : undefined)
 			?? null;
 		const facetText = syncFacet?.ytext ?? null;
@@ -694,7 +707,7 @@ export class EditorBindingManager {
 		const liveCm = this.getCmView(view);
 		const collab = this.getCollabDebugInfoForView(view);
 		const withinSettleWindow =
-			Date.now() - binding.lastBoundAtMs < BINDING_SETTLE_WINDOW_MS;
+			Date.now() - binding.lastBoundAtMs < binding.settleWindowMs;
 
 		if (!file) {
 			issues.push("missing-file");
@@ -753,6 +766,22 @@ export class EditorBindingManager {
 
 		const health = this.inspectBindingHealth(binding.view, binding);
 		if (health.healthy || health.settling) return;
+		if (source === "live-update") {
+			this.scheduleHealthCheck(leafId, LIVE_UPDATE_HEALTH_RETRY_DELAY_MS, "live-update-deferred");
+			return;
+		}
+		const onlyMissingSyncFacet =
+			health.issues.length === 1 && health.issues[0] === "missing-sync-facet";
+		if (onlyMissingSyncFacet && source !== "retry-health-check") {
+			const traceDetails = this.buildHealthTraceDetails(leafId, binding, source, health.issues);
+			this.trace?.("editor", "binding-health-missing-sync-facet-deferred", {
+				...traceDetails,
+				action: "deferred",
+			});
+			const retryDelayMs = binding.settleWindowMs + POST_BIND_HEALTH_GRACE_MS;
+			this.scheduleHealthCheck(leafId, retryDelayMs, "retry-health-check");
+			return;
+		}
 
 		const issues = health.issues.join(",") || "unknown";
 		const traceDetails = this.buildHealthTraceDetails(leafId, binding, source, health.issues);
@@ -773,20 +802,118 @@ export class EditorBindingManager {
 				this.rebind(binding.view, this.lastDeviceName, `${source}:${issues}`);
 			}
 			const latestBinding = this.bindings.get(leafId);
+			const tombstoned = this.isHardTombstonedPath(binding.path);
+			const postView = latestBinding?.view ?? binding.view;
+			const postHealth = latestBinding
+				? this.inspectBindingHealth(postView, latestBinding)
+				: null;
+			const restored =
+				tombstoned
+				|| (!!postHealth && (postHealth.healthy || postHealth.settling));
+			if (!restored) {
+				this.trace?.("editor", "binding-health-retry-scheduled", {
+					...traceDetails,
+					action: "retry-scheduled",
+					post: this.getCollabDebugInfoForView(postView),
+					postIssues: postHealth?.issues ?? ["missing-binding"],
+				});
+				const retryDelayMs =
+					(latestBinding?.settleWindowMs ?? BASE_BINDING_SETTLE_WINDOW_MS)
+					+ POST_BIND_HEALTH_GRACE_MS;
+				this.scheduleHealthCheck(leafId, retryDelayMs, "retry-health-check");
+				return;
+			}
 			this.trace?.("editor", "binding-health-restored", {
 				...traceDetails,
-				action: healed
-					? (!latestBinding
-						? "unbound"
-						: (latestBinding.path === binding.path
-							&& latestBinding.fileId === binding.fileId
-							? "heal"
-							: "rebound-target"))
-					: "rebind",
-				post: this.getCollabDebugInfoForView(binding.view),
+				action: tombstoned
+					? "unbound-tombstone"
+					: (postHealth?.settling
+						? "settling"
+						: (healed
+							? (!latestBinding
+								? "unbound"
+								: (latestBinding.path === binding.path
+									&& latestBinding.fileId === binding.fileId
+									? "heal"
+									: "rebound-target"))
+							: "rebind")),
+				postIssues: postHealth?.issues ?? [],
+				post: this.getCollabDebugInfoForView(postView),
 			});
 		} finally {
 			this.healthWorkInFlight.delete(leafId);
+		}
+	}
+
+	private scheduleCmResolveRetry(
+		view: MarkdownView,
+		deviceName: string,
+		leafId: string,
+		source: string,
+	): void {
+		const attempts = (this.cmResolveAttempts.get(leafId) ?? 0) + 1;
+		this.cmResolveAttempts.set(leafId, attempts);
+
+		if (attempts > CM_RESOLVE_MAX_RETRIES) {
+			this.warnCmDegraded();
+			this.trace?.("editor", "cm-resolution-degraded", {
+				leafId,
+				path: view.file?.path ?? null,
+				source,
+				attempts,
+			});
+			return;
+		}
+
+		if (this.pendingCmResolveRetries.has(leafId)) {
+			return;
+		}
+
+		const retryDelay = CM_RESOLVE_RETRY_DELAY_MS * attempts;
+		const timer = setTimeout(() => {
+			this.pendingCmResolveRetries.delete(leafId);
+			this.bind(view, deviceName);
+		}, retryDelay);
+		this.pendingCmResolveRetries.set(leafId, timer);
+	}
+
+	private clearCmResolveRetry(leafId: string): void {
+		const timer = this.pendingCmResolveRetries.get(leafId);
+		if (timer) {
+			clearTimeout(timer);
+			this.pendingCmResolveRetries.delete(leafId);
+		}
+		this.cmResolveAttempts.delete(leafId);
+	}
+
+	private scheduleHealthCheck(
+		leafId: string,
+		delayMs: number,
+		source: string,
+	): void {
+		this.clearScheduledHealthCheck(leafId);
+		const timer = setTimeout(() => {
+			this.pendingHealthChecks.delete(leafId);
+			const binding = this.bindings.get(leafId);
+			if (!binding) return;
+			this.maybeHealBinding(leafId, binding, source);
+		}, delayMs);
+		this.pendingHealthChecks.set(leafId, timer);
+	}
+
+	private schedulePostBindHealthCheck(leafId: string, settleWindowMs: number): void {
+		this.scheduleHealthCheck(
+			leafId,
+			settleWindowMs + POST_BIND_HEALTH_GRACE_MS,
+			"post-bind-health",
+		);
+	}
+
+	private clearScheduledHealthCheck(leafId: string): void {
+		const timer = this.pendingHealthChecks.get(leafId);
+		if (timer) {
+			clearTimeout(timer);
+			this.pendingHealthChecks.delete(leafId);
 		}
 	}
 
@@ -849,6 +976,13 @@ export class EditorBindingManager {
 			this.cmToLeafId.delete(existing.cm);
 		}
 		const boundAtMs = Date.now();
+		const rapidSwitch =
+			!!existing
+			&& existing.path !== filePath
+			&& boundAtMs - existing.lastBoundAtMs <= FAST_SWITCH_WINDOW_MS;
+		const settleWindowMs = rapidSwitch
+			? FAST_SWITCH_BINDING_SETTLE_WINDOW_MS
+			: BASE_BINDING_SETTLE_WINDOW_MS;
 		this.bindings.set(leafId, {
 			view,
 			path: filePath,
@@ -859,9 +993,10 @@ export class EditorBindingManager {
 			lastBoundAt: new Date(boundAtMs).toISOString(),
 			lastBoundAtMs: boundAtMs,
 			lastEditorChangeAtMs: boundAtMs,
+			settleWindowMs,
 		});
 		this.cmToLeafId.set(cm, leafId);
-		this.schedulePostBindHealthCheck(leafId);
+		this.schedulePostBindHealthCheck(leafId, settleWindowMs);
 		this.trace?.("editor", "binding-applied", {
 			action,
 			leafId,
@@ -869,13 +1004,18 @@ export class EditorBindingManager {
 			cmId,
 			fileId: fileId ?? null,
 			reason: reason ?? null,
+			settleWindowMs,
+			rapidSwitch,
 		});
 
 		const result = action === "repair" ? "repaired" : "bound";
 		const reasonSuffix = reason ? `, reason=${reason}` : "";
+		const settleSuffix = rapidSwitch
+			? `, settleWindowMs=${settleWindowMs}, rapidSwitch=true`
+			: `, settleWindowMs=${settleWindowMs}`;
 		this.log(
 			`${action}: ${result} "${filePath}" ` +
-			`(leaf=${leafId}, cm=${cmId}${fileId ? `, fileId=${fileId}` : ""}${reasonSuffix})`,
+			`(leaf=${leafId}, cm=${cmId}${fileId ? `, fileId=${fileId}` : ""}${reasonSuffix}${settleSuffix})`,
 		);
 		return true;
 	}
@@ -884,25 +1024,6 @@ export class EditorBindingManager {
 		this.trace?.("editor", msg);
 		if (this.debug) {
 			console.log(`[yaos:editor] ${msg}`);
-		}
-	}
-
-	private schedulePostBindHealthCheck(leafId: string): void {
-		this.clearScheduledHealthCheck(leafId);
-		const timer = setTimeout(() => {
-			this.pendingHealthChecks.delete(leafId);
-			const binding = this.bindings.get(leafId);
-			if (!binding) return;
-			this.maybeHealBinding(leafId, binding, "post-bind-health");
-		}, POST_BIND_HEALTH_CHECK_DELAY_MS);
-		this.pendingHealthChecks.set(leafId, timer);
-	}
-
-	private clearScheduledHealthCheck(leafId: string): void {
-		const timer = this.pendingHealthChecks.get(leafId);
-		if (timer) {
-			clearTimeout(timer);
-			this.pendingHealthChecks.delete(leafId);
 		}
 	}
 
@@ -938,7 +1059,7 @@ export class EditorBindingManager {
 			return {
 				ytext: existingText,
 				fileId:
-					this.vaultSync.pathToId.get(file.path)
+					this.vaultSync.getFileId(file.path)
 					?? this.vaultSync.getFileIdForText(existingText),
 			};
 		}
@@ -968,7 +1089,7 @@ export class EditorBindingManager {
 		return {
 			ytext,
 			fileId:
-				this.vaultSync.pathToId.get(file.path)
+				this.vaultSync.getFileId(file.path)
 				?? this.vaultSync.getFileIdForText(ytext),
 		};
 	}
