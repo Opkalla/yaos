@@ -30,10 +30,6 @@ function readBooleanConst(source, name) {
 }
 
 const serverVersion = readStringConst(serverVersionSource, "SERVER_VERSION");
-const recommendedPluginVersion = readStringConst(
-	serverVersionSource,
-	"SERVER_RECOMMENDED_PLUGIN_VERSION",
-);
 const minCompatibleServerVersionForPlugin = readStringConst(
 	serverVersionSource,
 	"SERVER_MIN_COMPATIBLE_SERVER_VERSION_FOR_PLUGIN",

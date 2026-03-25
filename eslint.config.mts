@@ -16,6 +16,15 @@ export default tseslint.config(
 			},
 		},
 	},
+	{
+		files: ["**/*.mjs"],
+		languageOptions: {
+			globals: {
+				...globals.node,
+				fetch: "readonly",
+			},
+		},
+	},
 	...obsidianmd.configs.recommended,
 	{
 		files: ["**/*.ts"],

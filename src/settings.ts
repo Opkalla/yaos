@@ -410,7 +410,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			}
 			if (updateState.legacyServerDetected) {
 				updateCard.createEl("p", {
-					text: "Legacy YAOS server detected. Sync will continue, but update metadata and 1-click updater features need a newer server.",
+					text: "Legacy server detected. Sync will continue, but update metadata and 1-click updater features need a newer server.",
 					cls: "yaos-settings-security-warning",
 				});
 			}
@@ -659,9 +659,9 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				.setName("Deployment default branch")
 				.setDesc("Used for GitLab pipeline links and future provider-native update helpers.")
 				.addText((text) =>
-					text
-						.setPlaceholder("main")
-						.setValue(this.plugin.settings.updateRepoBranch)
+						text
+							.setPlaceholder("Default branch (for example, main)")
+							.setValue(this.plugin.settings.updateRepoBranch)
 						.onChange(async (value) => {
 							this.plugin.settings.updateRepoBranch = value.trim() || "main";
 							await this.plugin.saveSettings();

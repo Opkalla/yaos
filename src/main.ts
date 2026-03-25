@@ -2938,10 +2938,12 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 					lastError = err;
 					this.log(`Update manifest fetch failed from ${url}: ${formatUnknown(err)}`);
 				}
-			}
-			if (!nextManifest) {
-				throw (lastError ?? new Error("all update manifest sources failed"));
-			}
+				}
+				if (!nextManifest) {
+					throw lastError instanceof Error
+						? lastError
+						: new Error("all update manifest sources failed");
+				}
 			this.updateManifest = nextManifest;
 			this.updateManifestFetchedAt = Date.now();
 			await this.persistPluginState();
@@ -3024,7 +3026,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 	private maybeShowLegacyServerNotice(): void {
 		if (this.legacyServerNoticeShown) return;
 		new Notice(
-			"Legacy YAOS server detected. Sync continues, but update metadata and 1-click updater features need a newer server.",
+			"Legacy server detected. Sync continues, but update metadata and 1-click updater features need a newer server.",
 			12000,
 		);
 		this.legacyServerNoticeShown = true;

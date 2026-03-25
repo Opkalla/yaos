@@ -238,7 +238,7 @@ async function setServerUpdateMetadata(env: Env, metadata: {
 		const body = await res.text().catch(() => "");
 		throw new Error(`update metadata write failed (${res.status})${body ? `: ${body}` : ""}`);
 	}
-	const payload = await res.json() as { config?: StoredServerConfig };
+	const payload: { config?: StoredServerConfig } = await res.json();
 	if (!payload?.config) {
 		throw new Error("update metadata write failed (missing config)");
 	}

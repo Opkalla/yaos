@@ -73,7 +73,7 @@ function normalizeUpdateRepoBranch(value: unknown): string | null {
 		throw new Error("invalid updateRepoBranch");
 	}
 	// Keep this strict and safe for URL/query usage.
-	if (!/^[A-Za-z0-9._/\-]+$/.test(raw) || raw.includes("..")) {
+	if (!/^[A-Za-z0-9._/-]+$/.test(raw) || raw.includes("..")) {
 		throw new Error("invalid updateRepoBranch");
 	}
 	return raw;
