@@ -13,6 +13,7 @@ export interface ServerCapabilities {
 	migrationRequired: boolean;
 	updateProvider: "github" | "gitlab" | "unknown" | null;
 	updateRepoUrl: string | null;
+	updateRepoBranch?: string | null;
 }
 
 export async function fetchServerCapabilities(host: string): Promise<ServerCapabilities> {

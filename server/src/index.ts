@@ -220,6 +220,31 @@ async function claimServerConfig(env: Env, tokenHash: string): Promise<boolean> 
 	return res.ok;
 }
 
+async function setServerUpdateMetadata(env: Env, metadata: {
+	updateProvider?: unknown;
+	updateRepoUrl?: unknown;
+	updateRepoBranch?: unknown;
+}): Promise<StoredServerConfig> {
+	const id = env.YAOS_CONFIG.idFromName("global-config");
+	const stub = env.YAOS_CONFIG.get(id);
+	const res = await stub.fetch("https://internal/__yaos/update-metadata", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(metadata),
+	});
+	if (!res.ok) {
+		const body = await res.text().catch(() => "");
+		throw new Error(`update metadata write failed (${res.status})${body ? `: ${body}` : ""}`);
+	}
+	const payload = await res.json() as { config?: StoredServerConfig };
+	if (!payload?.config) {
+		throw new Error("update metadata write failed (missing config)");
+	}
+	return payload.config;
+}
+
 async function getAuthState(env: Env): Promise<AuthState> {
 	const envToken = env.SYNC_TOKEN?.trim();
 	if (envToken) {
@@ -260,7 +285,7 @@ function buildObsidianSetupUrl(host: string, token: string, vaultId?: string): s
 	return `obsidian://yaos?${params.toString()}`;
 }
 
-function getCapabilities(auth: AuthState, env: Env): {
+function getCapabilities(auth: AuthState, env: Env, config: StoredServerConfig | null = null): {
 	claimed: boolean;
 	authMode: "env" | "claim" | "unclaimed";
 	attachments: boolean;
@@ -273,6 +298,7 @@ function getCapabilities(auth: AuthState, env: Env): {
 	migrationRequired: boolean;
 	updateProvider: UpdateProvider | null;
 	updateRepoUrl: string | null;
+	updateRepoBranch: string | null;
 } {
 	const bucketEnabled = supportsBuckets(env);
 	return {
@@ -286,8 +312,9 @@ function getCapabilities(auth: AuthState, env: Env): {
 		minSchemaVersion: SERVER_MIN_SCHEMA_VERSION,
 		maxSchemaVersion: SERVER_MAX_SCHEMA_VERSION,
 		migrationRequired: SERVER_MIGRATION_REQUIRED,
-		updateProvider: null,
-		updateRepoUrl: null,
+		updateProvider: config?.updateProvider ?? null,
+		updateRepoUrl: config?.updateRepoUrl ?? null,
+		updateRepoBranch: config?.updateRepoBranch ?? null,
 	};
 }
 
@@ -514,7 +541,13 @@ const worker = {
 		}
 
 		if (req.method === "GET" && url.pathname === "/api/capabilities") {
-			return withCors(json(getCapabilities(authState, env)));
+			let config: StoredServerConfig | null = null;
+			try {
+				config = await getStoredServerConfig(env);
+			} catch (err) {
+				console.warn("[vault-sync] config fetch failed for capabilities:", err);
+			}
+			return withCors(json(getCapabilities(authState, env, config)));
 		}
 
 		if (req.method === "POST" && url.pathname === "/claim") {
@@ -544,12 +577,61 @@ const worker = {
 				return json({ error: "already_claimed" }, 403);
 			}
 
-				return json({
-					ok: true,
-					host: url.origin,
-					obsidianUrl: buildObsidianSetupUrl(url.origin, token, vaultId || undefined),
-					capabilities: getCapabilities({ mode: "claim", claimed: true, tokenHash }, env),
-				});
+			let claimedConfig: StoredServerConfig | null = null;
+			try {
+				claimedConfig = await getStoredServerConfig(env);
+			} catch (err) {
+				console.warn("[vault-sync] config fetch failed after claim:", err);
+			}
+
+			return json({
+				ok: true,
+				host: url.origin,
+				obsidianUrl: buildObsidianSetupUrl(url.origin, token, vaultId || undefined),
+				capabilities: getCapabilities({ mode: "claim", claimed: true, tokenHash }, env, claimedConfig),
+			});
+		}
+
+		if (req.method === "POST" && url.pathname === "/api/update-metadata") {
+			const token = getHttpAuthToken(req);
+			if (!authState.claimed) {
+				return withCors(json({ error: "unclaimed" }, 503));
+			}
+			if (authState.mode === "env" && !authState.envToken) {
+				return withCors(json({ error: "server_misconfigured" }, 503));
+			}
+			if (!(await isAuthorized(authState, token))) {
+				return withCors(json({ error: "unauthorized" }, 401));
+			}
+
+			let body: {
+				updateProvider?: unknown;
+				updateRepoUrl?: unknown;
+				updateRepoBranch?: unknown;
+			} = {};
+			try {
+				body = await req.json();
+			} catch {
+				return withCors(json({ error: "invalid json" }, 400));
+			}
+
+			let updatedConfig: StoredServerConfig;
+			try {
+				updatedConfig = await setServerUpdateMetadata(env, body);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : "metadata write failed";
+				const status = message.includes("(403)")
+					? 403
+					: message.includes("(400)")
+						? 400
+						: 500;
+				return withCors(json({ error: message }, status));
+			}
+
+			return withCors(json({
+				ok: true,
+				capabilities: getCapabilities(authState, env, updatedConfig),
+			}));
 		}
 
 		const syncRoute = parseSyncPath(url.pathname);
