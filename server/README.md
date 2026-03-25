@@ -2,7 +2,7 @@
 
 Cloudflare Worker server for the YAOS Obsidian plugin. It relays Yjs CRDT updates through a Durable Object and stores attachments plus snapshots in R2.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kavinsood/yaos-update-test-20260325/tree/main/server)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kavinsood/yaos/tree/main/server)
 
 ## Architecture
 
@@ -50,11 +50,12 @@ The Deploy to Cloudflare button creates a new repository in your own Git account
 
 That means future pushes to your generated repo will redeploy automatically, but future pushes to the original `kavinsood/yaos` template repo will not update your existing Worker on their own.
 
-To pick up new YAOS changes later, either:
+To pick up new YAOS changes later:
 
-1. Merge upstream changes from `kavinsood/yaos` into the generated repo Cloudflare created for you.
-2. Push your own commits to that generated repo and let Cloudflare redeploy from there.
-3. Start a fresh deployment from the button if you would rather re-deploy than maintain Git history.
+1. Add your generated repo URL in the plugin settings (`Deployment repo URL`).
+2. Use **Initialize updater** once (GitHub) if workflows are missing.
+3. Use **Open update action** from plugin settings and run the update workflow.
+4. Cloudflare redeploys automatically after the workflow push.
 
 ### Manual CLI deploy
 

@@ -4,7 +4,7 @@
 
 Your notes stay in sync instantly across devices, without conflicted copies, delayed file sync, or database-heavy self-hosting.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kavinsood/yaos-update-test-20260325/tree/main/server)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kavinsood/yaos/tree/main/server)
 
 No terminal, no `.env` files, no database setup required. R2 is optional.
 
@@ -38,6 +38,13 @@ Open the URL Cloudflare gives you. Click **Claim** to generate your setup token 
 
 **4. Connect your vault**  
 From the claim page, open the setup link or scan the QR code. YAOS will fill in the connection details automatically.
+
+## Updating your server
+
+1. Open **Settings → YAOS → Advanced** and set your generated deployment repo URL.
+2. Click **Initialize updater** once (GitHub only, if workflows are missing).
+3. Click **Open update action** and run the update workflow.
+4. Cloudflare redeploys automatically after the workflow commit.
 
 ## Why YAOS exists
 
