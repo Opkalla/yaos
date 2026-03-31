@@ -97,6 +97,27 @@ Cloudflare transport limits improved over time, but network headroom is not the 
 
 So the architectural ceiling has moved from "immediate storage crash" to "compute and memory behavior at very large scale," which is the correct class of bottleneck for this system.
 
+## Follow-up: what this engine did not solve
+
+Later Durable Object hardening work is worth naming explicitly so future readers
+do not over-attribute responsibilities to the checkpoint/journal engine.
+
+The checkpoint/journal design solved the **write-shape** problem for the
+monolithic room document. It did not automatically solve:
+
+- full-document decode on websocket schema admission
+- observability storage shape outside the document engine
+- duplicate room-load work during concurrent cold start
+
+Those issues were addressed separately via:
+
+- lightweight `roomMeta` for schema admission
+- bounded per-entry trace storage
+- single-flight room load gating
+
+This distinction matters because the storage engine was already correct; the
+remaining work lived on the admission, observability, and lifecycle paths.
+
 ## Current status
 
 The storage engine now has:

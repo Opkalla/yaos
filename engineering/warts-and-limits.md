@@ -45,6 +45,33 @@ In practice, compute and memory behavior usually become the first bottlenecks be
 
 ## Operational warts and intentional tradeoffs
 
+### Observability is bounded and fail-open by design
+
+YAOS originally kept room traces in one growing storage value. Real production
+logs showed that this could trigger `SQLITE_TOOBIG` and take the room down.
+
+The current design stores traces as bounded per-entry records and treats trace
+persistence as fail-open.
+
+Implications:
+
+- observability can still lose entries under storage errors
+- observability should never be able to make the room unavailable
+
+This is the correct trade for telemetry in a sync engine.
+
+### Schema admission uses a metadata sidecar
+
+Websocket schema admission now reads a small room metadata sidecar rather than
+reconstructing the full room document in the common case.
+
+This sidecar is intentionally narrow:
+
+- it exists for tiny admission decisions
+- it is not a second source of truth for room contents
+
+Fallback to full-document probing remains for legacy/missing metadata cases.
+
 ### CRDT tombstones are retained
 
 In YAOS, markdown tombstones (records of deleted files) are intentionally retained in the CRDT graph.
@@ -87,3 +114,4 @@ The standard is not "perfect abstraction." The standard is explicit correctness 
 - No cryptographic prev-hash chain between journal segments yet (current model uses per-segment hash plus strict sequence validation).
 - No per-file sharded CRDT model yet (current design intentionally preserves monolithic cross-file transactional semantics).
 - WebSocket auth still supports query token transport; target state is explicit post-connect auth handshake plus short-lived session credentials.
+- Worker RAM caching for config/auth reads remains optional micro-optimization, not core architecture.

@@ -16,6 +16,41 @@ Summary:
 - blob downloads are gated until both layout-ready and startup-ready
 - sampled garden logs show `startup-onload-complete` in ~`9-15ms`
 
+## Durable Object hardening pass (March 30-31, 2026)
+
+Post-`1.4.0` server hardening was driven by real production errors from a live
+deployment.
+
+Observed production issue:
+
+- `SQLITE_TOOBIG` on websocket, `/__yaos/trace`, and `/__yaos/document` paths
+
+Root cause:
+
+- observability trace ring stored as one growing SQLite value inside the room DO
+
+What changed:
+
+- trace storage redesigned to bounded per-entry records
+- trace persistence made fail-open
+- `/__yaos/trace`, `/__yaos/debug`, and `/__yaos/meta` moved above hydration
+- schema admission moved to metadata-first probing via `roomMeta`
+- cold-start room loading gated behind single-flight logic
+- snapshot `maybe` serialized inside the room DO
+- regressions added for trace sizing and concurrency helper behavior
+
+Validation:
+
+- `cd server && npm run typecheck`
+- `npm run test:regressions`
+- `node tests/worker-integration.mjs`
+
+Outcome:
+
+- original `SQLITE_TOOBIG` failure mode is eliminated
+- oversized trace payloads are truncated safely
+- no other production error class was observed in the supplied live logs
+
 ## Marketplace compliance follow-up (v1.2.1 cycle)
 
 Updates were merged to `main` and released in `v1.2.1`.
