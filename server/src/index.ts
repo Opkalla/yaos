@@ -28,6 +28,7 @@ const R2_HEAD_CONCURRENCY = 4;
 const CORS_ALLOW_HEADERS = "Authorization, Content-Type";
 const CORS_ALLOW_METHODS = "GET, POST, PUT, OPTIONS";
 const CORS_EXPOSE_HEADERS = "X-YAOS-Snapshot-Day";
+const LOG_PREFIX = "[yaos-sync:worker]";
 
 interface Env {
 	SYNC_TOKEN?: string;
@@ -334,7 +335,7 @@ async function recordVaultTrace(
 			body: JSON.stringify({ event, data }),
 		});
 	} catch (err) {
-		console.warn("[vault-sync] trace write failed:", err);
+		console.warn(`${LOG_PREFIX} trace write failed:`, err);
 	}
 }
 
@@ -347,8 +348,33 @@ async function fetchVaultDocument(env: Env, vaultId: string): Promise<Uint8Array
 	return new Uint8Array(await res.arrayBuffer());
 }
 
+async function fetchVaultRoomMeta(env: Env, vaultId: string): Promise<{
+	schemaVersion: number | null;
+} | null> {
+	const stub = await getServerByName(env.YAOS_SYNC, vaultId);
+	const res = await stub.fetch("https://internal/__yaos/meta");
+	if (!res.ok) {
+		throw new Error(`room meta fetch failed (${res.status})`);
+	}
+	const payload: {
+		meta?: { schemaVersion?: unknown } | null;
+	} = await res.json();
+	const schemaVersion = payload?.meta?.schemaVersion;
+	if (schemaVersion === null) {
+		return { schemaVersion: null };
+	}
+	if (typeof schemaVersion === "number" && Number.isInteger(schemaVersion) && schemaVersion >= 0) {
+		return { schemaVersion };
+	}
+	return null;
+}
+
 async function fetchVaultSchemaVersion(env: Env, vaultId: string): Promise<number | null> {
 	try {
+		const meta = await fetchVaultRoomMeta(env, vaultId);
+		if (meta) {
+			return meta.schemaVersion;
+		}
 		const update = await fetchVaultDocument(env, vaultId);
 		const doc = new Y.Doc();
 		try {
@@ -362,7 +388,7 @@ async function fetchVaultSchemaVersion(env: Env, vaultId: string): Promise<numbe
 			doc.destroy();
 		}
 	} catch (err) {
-		console.warn("[vault-sync] schema probe failed:", err);
+		console.warn(`${LOG_PREFIX} schema probe failed:`, err);
 		return null;
 	}
 }
@@ -545,7 +571,7 @@ const worker = {
 			try {
 				config = await getStoredServerConfig(env);
 			} catch (err) {
-				console.warn("[vault-sync] config fetch failed for capabilities:", err);
+				console.warn(`${LOG_PREFIX} config fetch failed for capabilities:`, err);
 			}
 			return withCors(json(getCapabilities(authState, env, config)));
 		}
@@ -581,7 +607,7 @@ const worker = {
 			try {
 				claimedConfig = await getStoredServerConfig(env);
 			} catch (err) {
-				console.warn("[vault-sync] config fetch failed after claim:", err);
+				console.warn(`${LOG_PREFIX} config fetch failed after claim:`, err);
 			}
 
 			return json({
@@ -786,13 +812,6 @@ const worker = {
 			}
 
 			if (req.method === "POST" && rest[0] === "maybe" && rest.length === 1) {
-				if (!env.YAOS_BUCKET) {
-					return withCors(json({
-						status: "unavailable",
-						reason: "R2 bucket not configured",
-					} satisfies SnapshotResult));
-				}
-
 				let body: { device?: string } = {};
 				try {
 					body = await req.json();
@@ -800,23 +819,17 @@ const worker = {
 					body = {};
 				}
 
-				const currentDay = new Date().toISOString().slice(0, 10);
-				if (await hasSnapshotForDay(vaultRoute.vaultId, currentDay, env.YAOS_BUCKET)) {
-					const snapshots = await listSnapshots(vaultRoute.vaultId, env.YAOS_BUCKET);
-					const latestToday = snapshots.find((snapshot) => snapshot.day === currentDay);
-					return withCors(json({
-						status: "noop",
-						snapshotId: latestToday?.snapshotId,
-						reason: `Snapshot already taken today (${currentDay})`,
-					} satisfies SnapshotResult));
-				}
-
-				const result = await createSnapshotFromLiveDoc(
-					env,
-					vaultRoute.vaultId,
-					body.device,
-				);
+				const stub = await getServerByName(env.YAOS_SYNC, vaultRoute.vaultId);
+				const res = await stub.fetch("https://internal/__yaos/snapshot-maybe", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify(body),
+				});
+				const result = await res.json() as SnapshotResult;
 				await recordVaultTrace(env, vaultRoute.vaultId, "snapshot-created", {
+					status: result.status,
 					snapshotId: result.snapshotId,
 					triggeredBy: body.device,
 				});
