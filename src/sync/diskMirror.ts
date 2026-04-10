@@ -104,10 +104,13 @@ export class DiskMirror {
 		debug: boolean,
 		private trace?: TraceRecord,
 		private frontmatterGuardEnabled: () => boolean = () => true,
-		private onFrontmatterBlocked?: (
+		private onFrontmatterValidated?: (
 			path: string,
 			direction: "crdt-to-disk",
+			reason: "flush-write",
 			validation: FrontmatterValidationResult,
+			previousContent: string | null,
+			nextContent: string,
 		) => void,
 	) {
 		this.debug = debug;
@@ -489,6 +492,14 @@ export class DiskMirror {
 		if (!this.frontmatterGuardEnabled()) return false;
 
 		const validation = validateFrontmatterTransition(previousContent, nextContent);
+		this.onFrontmatterValidated?.(
+			path,
+			"crdt-to-disk",
+			"flush-write",
+			validation,
+			previousContent,
+			nextContent,
+		);
 		if (!isFrontmatterBlocked(validation)) return false;
 
 		this.trace?.("trace", "frontmatter-quarantined", {
@@ -506,7 +517,6 @@ export class DiskMirror {
 			`frontmatter write blocked for "${path}" ` +
 			`(${validation.reasons.join(", ") || validation.risk})`,
 		);
-		this.onFrontmatterBlocked?.(path, "crdt-to-disk", validation);
 		return true;
 	}
 

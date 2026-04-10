@@ -25,8 +25,16 @@ import { applyDiffToYText } from "./sync/diff";
 import {
 	isFrontmatterBlocked,
 	validateFrontmatterTransition,
+	extractFrontmatter,
 	type FrontmatterValidationResult,
 } from "./sync/frontmatterGuard";
+import {
+	buildFrontmatterQuarantineDebugLines,
+	clearFrontmatterQuarantinePath,
+	readPersistedFrontmatterQuarantine,
+	upsertFrontmatterQuarantineEntry,
+	type FrontmatterQuarantineEntry,
+} from "./sync/frontmatterQuarantine";
 import {
 	type DiskIndex,
 	collectFileStats,
@@ -77,6 +85,7 @@ type PersistedPluginState = Partial<VaultSyncSettings> & {
 	_blobQueue?: BlobQueueSnapshot;
 	_serverCapabilitiesCache?: PersistedServerCapabilitiesCache;
 	_updateManifestCache?: PersistedUpdateManifestCache;
+	_frontmatterQuarantine?: FrontmatterQuarantineEntry[];
 };
 
 /** Minimum interval between reconcile runs (prevents rapid reconnect churn). */
@@ -286,6 +295,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 	private commandsRegistered = false;
 	private idbDegradedHandled = false;
 	private frontmatterGuardNoticeAt = new Map<string, number>();
+	private frontmatterQuarantineEntries: FrontmatterQuarantineEntry[] = [];
 
 	/**
 	 * True when startup timed out waiting for provider sync.
@@ -449,7 +459,15 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				this.settings.debug,
 				(source, msg, details) => this.trace(source, msg, details),
 				() => this.settings.frontmatterGuardEnabled,
-				(path, direction) => this.showFrontmatterGuardNotice(path, direction),
+				(path, direction, reason, validation, previousContent, nextContent) =>
+					this.handleFrontmatterValidation(
+						path,
+						direction,
+						reason,
+						validation,
+						previousContent,
+						nextContent,
+					),
 			);
 			this.diskMirror.startMapObservers();
 
@@ -2167,22 +2185,47 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		if (!this.settings.frontmatterGuardEnabled) return false;
 
 		const validation = validateFrontmatterTransition(previousContent, nextContent);
+		this.handleFrontmatterValidation(
+			path,
+			"disk-to-crdt",
+			reason,
+			validation,
+			previousContent,
+			nextContent,
+		);
 		if (!isFrontmatterBlocked(validation)) return false;
+		this.log(
+			`Frontmatter ingest blocked for "${path}" ` +
+			`(${validation.reasons.join(", ") || validation.risk})`,
+		);
+		return true;
+	}
+
+	private handleFrontmatterValidation(
+		path: string,
+		direction: "disk-to-crdt" | "crdt-to-disk",
+		reason: string,
+		validation: FrontmatterValidationResult,
+		previousContent: string | null,
+		nextContent: string,
+	): void {
+		if (validation.risk === "ok") {
+			void this.clearFrontmatterQuarantine(path, `${direction}:${reason}`);
+			return;
+		}
+
+		if (!isFrontmatterBlocked(validation)) return;
 
 		this.traceFrontmatterQuarantine(
 			path,
-			"disk-to-crdt",
+			direction,
 			reason,
 			validation,
 			previousContent?.length ?? null,
 			nextContent.length,
 		);
-		this.log(
-			`Frontmatter ingest blocked for "${path}" ` +
-			`(${validation.reasons.join(", ") || validation.risk})`,
-		);
-		this.showFrontmatterGuardNotice(path, "disk-to-crdt");
-		return true;
+		this.showFrontmatterGuardNotice(path, direction);
+		void this.persistFrontmatterQuarantine(path, direction, validation, previousContent, nextContent);
 	}
 
 	private showFrontmatterGuardNotice(
@@ -2221,6 +2264,44 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			previousFrontmatterLength: validation.previousFrontmatterLength ?? null,
 			nextFrontmatterLength: validation.frontmatterLength,
 		});
+	}
+
+	private async persistFrontmatterQuarantine(
+		path: string,
+		direction: "disk-to-crdt" | "crdt-to-disk",
+		validation: FrontmatterValidationResult,
+		previousContent: string | null,
+		nextContent: string,
+	): Promise<void> {
+		const now = Date.now();
+		const prevHash = await this.hashFrontmatterContent(previousContent);
+		const nextHash = await this.hashFrontmatterContent(nextContent);
+		this.frontmatterQuarantineEntries = upsertFrontmatterQuarantineEntry(
+			this.frontmatterQuarantineEntries,
+			{
+				path,
+				firstSeenAt: now,
+				lastSeenAt: now,
+				direction,
+				reasons: validation.reasons,
+				prevHash,
+				nextHash,
+				count: 1,
+			},
+		);
+		await this.persistPluginState();
+	}
+
+	private async clearFrontmatterQuarantine(path: string, reason: string): Promise<void> {
+		if (this.frontmatterQuarantineEntries.length === 0) return;
+		const nextEntries = clearFrontmatterQuarantinePath(this.frontmatterQuarantineEntries, path);
+		if (nextEntries.length === this.frontmatterQuarantineEntries.length) return;
+		this.frontmatterQuarantineEntries = nextEntries;
+		this.trace("trace", "frontmatter-quarantine-cleared", {
+			path,
+			reason,
+		});
+		await this.persistPluginState();
 	}
 
 	private async updateDiskIndexForPath(path: string): Promise<void> {
@@ -2667,6 +2748,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			this.updateManifest = null;
 			this.updateManifestFetchedAt = 0;
 		}
+		this.frontmatterQuarantineEntries = readPersistedFrontmatterQuarantine(data?._frontmatterQuarantine);
 		this.refreshPersistedState();
 		if (migratedSettings) {
 			await this.persistPluginState();
@@ -3515,6 +3597,11 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		} else {
 			delete nextState._updateManifestCache;
 		}
+		if (this.frontmatterQuarantineEntries.length > 0) {
+			nextState._frontmatterQuarantine = this.frontmatterQuarantineEntries;
+		} else {
+			delete nextState._frontmatterQuarantine;
+		}
 		this.persistedState = nextState;
 	}
 
@@ -3572,6 +3659,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			`Open files: ${this.openFilePaths.size}`,
 			`Server trace events: ${this.recentServerTrace.length}`,
 			`Remote cursors: ${this.settings.showRemoteCursors ? "shown" : "hidden"}`,
+			...buildFrontmatterQuarantineDebugLines(this.frontmatterQuarantineEntries),
 		].join("\n");
 	}
 
@@ -3593,6 +3681,13 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		const data = new TextEncoder().encode(text);
 		const digest = await crypto.subtle.digest("SHA-256", data);
 		return arrayBufferToHex(digest);
+	}
+
+	private async hashFrontmatterContent(content: string | null): Promise<string | undefined> {
+		if (content == null) return undefined;
+		const block = extractFrontmatter(content);
+		if (block.kind !== "present") return undefined;
+		return await this.sha256Hex(block.frontmatterText);
 	}
 
 	private async exportDiagnostics(): Promise<void> {

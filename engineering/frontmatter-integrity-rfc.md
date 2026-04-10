@@ -21,10 +21,15 @@ P0 and the first P1 containment pass are implemented:
   in both disk-to-CRDT and CRDT-to-disk directions
 - blocked transitions are traced, surfaced with a throttled user notice, and can
   be opted out from Advanced settings for troubleshooting
+- blocked paths persist bounded diagnostic-only quarantine metadata in plugin
+  state for restart-safe debugging
+- parser-backed validation now complements the cheap extractor on changed
+  frontmatter slices, and schema-lite field policies are used for
+  classification only
 
 Still proposed:
 
-- persisted quarantine state and full recovery UI
+- full recovery UI
 - structure-aware frontmatter sidecar
 - canonical YAML rendering
 
@@ -280,13 +285,14 @@ guards and diagnostics.
 
 ### 5. Add frontmatter validation
 
-The first containment pass uses a cheap structural classifier. It blocks only
-obvious hazards such as duplicate top-level keys, repeated bare-key bursts,
+The first containment pass uses a cheap structural classifier plus parser-backed
+validation on the extracted frontmatter slice. It blocks only obvious hazards
+such as duplicate top-level keys, repeated bare-key bursts, parser failures,
 malformed frontmatter fences, and isolated frontmatter growth bursts.
 
-That first pass is an emergency brake, not a complete YAML policy. The durable
-implementation should use a real YAML parser rather than ad hoc string
-manipulation.
+That first pass is still an emergency brake, not a complete YAML policy. The
+durable implementation should keep parser-backed validation while avoiding
+premature merge or rewrite semantics.
 
 The validator should detect:
 
@@ -353,8 +359,9 @@ The quarantine should be clearable when:
 - the user disables the guard for the path
 
 The first implementation is skip behavior plus trace/log diagnostics, a
-throttled notice, and a global opt-out. Persisted per-file quarantine state and
-explicit accept/keep recovery controls should follow.
+throttled notice, a global opt-out, and bounded persisted quarantine metadata
+for debugging. Explicit accept/keep recovery controls should follow only if they
+remain consistent with YAOS snapshot and Obsidian File Recovery policy.
 
 ## P2: Structure-aware frontmatter sync
 

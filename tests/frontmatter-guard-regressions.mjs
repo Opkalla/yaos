@@ -2,6 +2,7 @@ const guardModule = await import("../src/sync/frontmatterGuard.ts");
 const guard = guardModule.default ?? guardModule;
 const {
 	extractFrontmatter,
+	getFieldPolicy,
 	validateFrontmatterTransition,
 	isFrontmatterBlocked,
 } = guard;
@@ -178,7 +179,72 @@ console.log("\n--- Test 8: extractor separates frontmatter and body ---");
 	assert(block.kind === "present" && block.bodyText === "\nbody", "body text is extracted");
 }
 
-console.log("\n--- Test 9: inbound blocked frontmatter does not poison CRDT ---");
+console.log("\n--- Test 9: parser-backed validation blocks invalid YAML ---");
+{
+	const next = [
+		"---",
+		"title: [broken",
+		"---",
+		"body",
+	].join("\n");
+	const result = validateFrontmatterTransition(null, next);
+	assert(isFrontmatterBlocked(result), "parser error is blocked");
+	assert(result.reasons.includes("yaml-parse-error"), "parser error reason is reported");
+}
+
+console.log("\n--- Test 10: schema-lite register fields block scalar/list flips ---");
+{
+	const previous = [
+		"---",
+		"tags:",
+		"  - home",
+		"timeEstimate: 20",
+		"---",
+		"body",
+	].join("\n");
+	const next = [
+		"---",
+		"tags: home",
+		"timeEstimate:",
+		"  - 20",
+		"---",
+		"body",
+	].join("\n");
+	const result = validateFrontmatterTransition(previous, next);
+	assert(isFrontmatterBlocked(result), "known field type flips are blocked");
+	assert(
+		result.reasons.includes("field-type-flip:tags:array->scalar"),
+		"list field type flip reason is reported",
+	);
+	assert(
+		result.reasons.includes("field-type-flip:timeEstimate:scalar->array"),
+		"register field type flip reason is reported",
+	);
+}
+
+console.log("\n--- Test 11: set-like duplicates warn instead of rewriting ---");
+{
+	const next = [
+		"---",
+		"tags:",
+		"  - home",
+		"  - home",
+		"---",
+		"body",
+	].join("\n");
+	const result = validateFrontmatterTransition(null, next);
+	assert(result.risk === "warn", "set-like duplicate values warn");
+	assert(result.reasons.includes("set-like-duplicates:tags"), "set-like duplicate reason is reported");
+}
+
+console.log("\n--- Test 12: field policy registry stays schema-lite ---");
+{
+	assert(getFieldPolicy("timeEstimate") === "register", "timeEstimate is treated as register");
+	assert(getFieldPolicy("tags") === "set-like", "tags is treated as set-like");
+	assert(getFieldPolicy("complete_instances") === "opaque", "unknown plugin fields stay opaque");
+}
+
+console.log("\n--- Test 13: inbound blocked frontmatter does not poison CRDT ---");
 {
 	const path = "Bathroom floor clean.md";
 	const clean = [
@@ -203,7 +269,7 @@ console.log("\n--- Test 9: inbound blocked frontmatter does not poison CRDT ---"
 	assert(bridge.blocked[0]?.direction === "disk-to-crdt", "inbound block records direction");
 }
 
-console.log("\n--- Test 10: outbound blocked frontmatter does not mutate disk ---");
+console.log("\n--- Test 14: outbound blocked frontmatter does not mutate disk ---");
 {
 	const path = "Bathroom floor clean.md";
 	const clean = [
@@ -228,7 +294,7 @@ console.log("\n--- Test 10: outbound blocked frontmatter does not mutate disk --
 	assert(bridge.blocked[0]?.direction === "crdt-to-disk", "outbound block records direction");
 }
 
-console.log("\n--- Test 11: repeated blocked retries do not loop writes ---");
+console.log("\n--- Test 15: repeated blocked retries do not loop writes ---");
 {
 	const path = "Bathroom floor clean.md";
 	const clean = [
@@ -255,7 +321,7 @@ console.log("\n--- Test 11: repeated blocked retries do not loop writes ---");
 	assert(bridge.writeCount === 0, "repeated blocked retries do not perform writes");
 }
 
-console.log("\n--- Test 12: body-only edits still flow through the guard harness ---");
+console.log("\n--- Test 16: body-only edits still flow through the guard harness ---");
 {
 	const path = "Body only.md";
 	const bridge = new FrontmatterBridgeHarness();
@@ -270,7 +336,39 @@ console.log("\n--- Test 12: body-only edits still flow through the guard harness
 	assert(bridge.disk.get(path) === "body after again\n", "body-only outbound edit updates disk");
 }
 
-console.log("\n--- Test 13: disabled guard allows suspicious frontmatter for troubleshooting ---");
+console.log("\n--- Test 17: incident-shaped frontmatter corruption is blocked without spread ---");
+{
+	const path = "Bathroom floor clean.md";
+	const clean = [
+		"---",
+		"timeEstimate: 20",
+		"taskSourceType: taskNotes",
+		"complete_instances:",
+		"  - 2026-04-09",
+		"---",
+		"body",
+	].join("\n");
+	const corrupt = [
+		"---",
+		"timeEstimate: 20",
+		"taskSourceType: taskNotes",
+		"taskSourceType: taskNotes",
+		"complete_instances:",
+		"  - 2026-04-09",
+		"  - 2026-04-09",
+		"---",
+		"body",
+	].join("\n");
+	const bridge = new FrontmatterBridgeHarness();
+	bridge.disk.set(path, clean);
+	bridge.crdt.set(path, clean);
+
+	bridge.crdt.set(path, corrupt);
+	assert(!bridge.outbound(path), "incident-shaped outbound corruption is blocked");
+	assert(bridge.disk.get(path) === clean, "blocked incident-shaped corruption does not reach disk");
+}
+
+console.log("\n--- Test 18: disabled guard allows suspicious frontmatter for troubleshooting ---");
 {
 	const path = "Bathroom floor clean.md";
 	const clean = [
