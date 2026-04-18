@@ -163,3 +163,5 @@ Access via command palette (Ctrl/Cmd+P):
 ## License
 
 [0-BSD](LICENSE)
+
+**Acknowledgements:** The initial landing page design was heavily inspired by and utilizes assets from the excellent folks at [superwhisper](https://superwhisper.com). Huge thanks to their creator for permitting temporary use while we fully redesign. (P.S. They are hiring!).
