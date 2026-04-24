@@ -206,7 +206,7 @@ function analyzeFrontmatter(frontmatterText: string): { blockReasons: string[]; 
 
 function parseFrontmatter(frontmatterText: string): ParsedFrontmatter {
 	try {
-		const parsed = yaml.load(frontmatterText);
+		const parsed = yaml.load(frontmatterText, { schema: yaml.CORE_SCHEMA });
 		if (parsed == null) {
 			return {
 				root: {},

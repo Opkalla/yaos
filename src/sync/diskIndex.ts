@@ -122,13 +122,28 @@ export async function collectFileStats(
 
 /**
  * Update the disk index with fresh stats after a successful reconcile.
+ *
+ * Files in `eligiblePaths` that are absent from `allStats` (failed to stat)
+ * keep their previous entry so they aren't treated as changed on every
+ * subsequent reconcile. Paths no longer eligible are evicted.
  */
 export function updateIndex(
 	index: DiskIndex,
 	allStats: Map<string, { mtime: number; size: number }>,
+	eligiblePaths?: Set<string>,
 ): DiskIndex {
 	const newIndex: DiskIndex = {};
 
+	// Carry forward entries for eligible files that couldn't be statted this pass.
+	if (eligiblePaths) {
+		for (const path of eligiblePaths) {
+			if (!allStats.has(path) && index[path]) {
+				newIndex[path] = index[path]!;
+			}
+		}
+	}
+
+	// Apply fresh stats (overwrites any carried-forward entry for the same path).
 	for (const [path, stat] of allStats) {
 		newIndex[path] = { mtime: stat.mtime, size: stat.size };
 	}

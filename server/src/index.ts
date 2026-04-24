@@ -461,6 +461,11 @@ async function handleBlobUpload(
 		}, 413);
 	}
 
+	const actualHash = await sha256Hex(new Uint8Array(body));
+	if (actualHash !== hash) {
+		return json({ error: "hash mismatch: uploaded content does not match URL hash" }, 400);
+	}
+
 	await env.YAOS_BUCKET.put(
 		blobKey(vaultId, hash),
 		body,

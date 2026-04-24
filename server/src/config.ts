@@ -137,22 +137,32 @@ export class ServerConfig {
 				return json({ error: err instanceof Error ? err.message : "invalid metadata" }, 400);
 			}
 
-				await this.state.storage.transaction(async (txn) => {
-					if (updateProvider !== null) {
-						await txn.put(UPDATE_PROVIDER_KEY, updateProvider);
-					}
-					if (updateRepoUrl !== null) {
-						await txn.put(UPDATE_REPO_URL_KEY, updateRepoUrl);
-					}
-					if (updateRepoBranch !== null) {
-						await txn.put(UPDATE_REPO_BRANCH_KEY, updateRepoBranch);
-					}
-				});
+			const config = await this.state.storage.transaction(async (txn) => {
+				if (updateProvider !== null) {
+					await txn.put(UPDATE_PROVIDER_KEY, updateProvider);
+				}
+				if (updateRepoUrl !== null) {
+					await txn.put(UPDATE_REPO_URL_KEY, updateRepoUrl);
+				}
+				if (updateRepoBranch !== null) {
+					await txn.put(UPDATE_REPO_BRANCH_KEY, updateRepoBranch);
+				}
+				return this.readConfigFromTxn(txn);
+			});
 
-			return json({ ok: true, config: await this.readConfig() });
+			return json({ ok: true, config });
 		}
 
 		return json({ error: "not found" }, 404);
+	}
+
+	private async readConfigFromTxn(txn: DurableObjectTransaction): Promise<StoredServerConfig> {
+		const claimed = await txn.get<boolean>(CLAIMED_KEY);
+		const tokenHash = await txn.get<string>(TOKEN_HASH_KEY);
+		const updateProvider = await txn.get<UpdateProvider>(UPDATE_PROVIDER_KEY);
+		const updateRepoUrl = await txn.get<string>(UPDATE_REPO_URL_KEY);
+		const updateRepoBranch = await txn.get<string>(UPDATE_REPO_BRANCH_KEY);
+		return this.buildConfig(claimed, tokenHash, updateProvider, updateRepoUrl, updateRepoBranch);
 	}
 
 	private async readConfig(): Promise<StoredServerConfig> {
@@ -161,6 +171,16 @@ export class ServerConfig {
 		const updateProvider = await this.state.storage.get<UpdateProvider>(UPDATE_PROVIDER_KEY);
 		const updateRepoUrl = await this.state.storage.get<string>(UPDATE_REPO_URL_KEY);
 		const updateRepoBranch = await this.state.storage.get<string>(UPDATE_REPO_BRANCH_KEY);
+		return this.buildConfig(claimed, tokenHash, updateProvider, updateRepoUrl, updateRepoBranch);
+	}
+
+	private buildConfig(
+		claimed: boolean | undefined,
+		tokenHash: string | undefined,
+		updateProvider: UpdateProvider | undefined,
+		updateRepoUrl: string | undefined,
+		updateRepoBranch: string | undefined,
+	): StoredServerConfig {
 		return {
 			claimed: claimed === true && typeof tokenHash === "string" && tokenHash.length > 0,
 			tokenHash: typeof tokenHash === "string" && tokenHash.length > 0 ? tokenHash : null,

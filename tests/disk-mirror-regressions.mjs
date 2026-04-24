@@ -1,4 +1,3 @@
-const SUPPRESS_MS = 500;
 const encoder = new TextEncoder();
 
 let passed = 0;
@@ -44,7 +43,6 @@ class DiskMirrorHarness {
 	suppressDelete(path) {
 		this.suppressedPaths.set(path, {
 			kind: "delete",
-			expiresAt: Date.now() + SUPPRESS_MS,
 		});
 	}
 
@@ -78,18 +76,13 @@ class DiskMirrorHarness {
 	}
 
 	getActiveSuppression(path) {
-		const entry = this.suppressedPaths.get(path);
-		if (!entry) return null;
-		if (Date.now() < entry.expiresAt) return entry;
-		this.suppressedPaths.delete(path);
-		return null;
+		return this.suppressedPaths.get(path) ?? null;
 	}
 
 	async suppressWrite(path, content) {
 		const fingerprint = await fingerprintContent(content);
 		this.suppressedPaths.set(path, {
 			kind: "write",
-			expiresAt: Date.now() + SUPPRESS_MS,
 			expectedBytes: fingerprint.bytes,
 			expectedHash: fingerprint.hash,
 		});

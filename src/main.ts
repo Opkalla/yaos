@@ -470,6 +470,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 						previousContent,
 						nextContent,
 					),
+				(path) => this.isMarkdownPathSyncable(path),
 			);
 			this.diskMirror.startMapObservers();
 
@@ -1007,11 +1008,13 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				}
 
 				for (const path of result.createdOnDisk) {
+					if (!this.isMarkdownPathSyncable(path)) continue;
 					await this.diskMirror.flushWrite(path);
 					flushedCreates++;
 				}
 				if (!safetyBrakeTriggered) {
 					for (const path of result.updatedOnDisk) {
+						if (!this.isMarkdownPathSyncable(path)) continue;
 						await this.diskMirror.flushWrite(path);
 						flushedUpdates++;
 					}
@@ -1031,8 +1034,10 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			this.untrackedFiles = result.untracked;
 			this.reconciled = true;
 
-			// Update disk index with fresh stats
-			this.diskIndex = updateIndex(this.diskIndex, allStats);
+			// Update disk index with fresh stats, carrying forward entries for
+			// eligible files that couldn't be statted this pass.
+			const eligiblePaths = new Set(eligibleFiles.map((f) => f.path));
+			this.diskIndex = updateIndex(this.diskIndex, allStats, eligiblePaths);
 			void this.saveDiskIndex();
 
 			// Run integrity checks after reconciliation (orphan GC + duplicate detection)
@@ -4311,7 +4316,21 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				snapshot,
 				this.getTraceHttpContext(),
 			);
-			const diff = diffSnapshot(snapshotDoc, this.vaultSync.ydoc);
+			const rawDiff = diffSnapshot(snapshotDoc, this.vaultSync.ydoc);
+
+			// Filter excluded paths from the diff before presenting the restore UI.
+			const diff: typeof rawDiff = {
+				...rawDiff,
+				deletedSinceSnapshot: rawDiff.deletedSinceSnapshot.filter(
+					(d) => this.isMarkdownPathSyncable(d.path),
+				),
+				contentChanged: rawDiff.contentChanged.filter(
+					(d) => this.isMarkdownPathSyncable(d.path),
+				),
+				createdSinceSnapshot: rawDiff.createdSinceSnapshot.filter(
+					(p) => this.isMarkdownPathSyncable(p),
+				),
+			};
 
 			let destroyed = false;
 			const cleanup = () => {
@@ -4364,8 +4383,9 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 						device: this.settings.deviceName,
 					});
 
-					// Flush restored files to disk
+					// Flush restored files to disk (skip excluded paths)
 					for (const path of markdownPaths) {
+						if (!this.isMarkdownPathSyncable(path)) continue;
 						await this.diskMirror?.flushWrite(path, true);
 					}
 

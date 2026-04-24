@@ -17,14 +17,13 @@ import {
  *   - Remote-only writes (skip local yCollab/seed/disk-sync origins)
  *   - Lazy per-file Y.Text observers
  *   - Concurrency-limited write queue (prevents burst I/O on git pull)
- *   - Loop suppression via timed path suppression
+ *   - Loop suppression via content-fingerprint suppression (no TTL)
  */
 
 const DEBOUNCE_MS = 300;
 const DEBOUNCE_BURST_MS = 1000;
 const OPEN_FILE_IDLE_MS = 1500;
 const OPEN_FILE_ACTIVE_GRACE_MS = 1200;
-const SUPPRESS_MS = 500;
 const MAX_CONCURRENT_WRITES = 5;
 const BURST_THRESHOLD = 20;
 
@@ -66,7 +65,6 @@ function describeOrigin(origin: unknown, provider: unknown): string {
 
 interface SuppressionEntry {
 	kind: "write" | "delete";
-	expiresAt: number;
 	expectedBytes?: number;
 	expectedHash?: string;
 }
@@ -112,6 +110,7 @@ export class DiskMirror {
 			previousContent: string | null,
 			nextContent: string,
 		) => void,
+		private isPathSyncable: (path: string) => boolean = () => true,
 	) {
 		this.debug = debug;
 	}
@@ -141,7 +140,7 @@ export class DiskMirror {
 
 				// Remote undelete/restore transition.
 				if (newPath && !isDeleted && wasDeleted) {
-					this.scheduleWrite(newPath);
+					if (this.isPathSyncable(newPath)) this.scheduleWrite(newPath);
 					return;
 				}
 
@@ -153,7 +152,7 @@ export class DiskMirror {
 
 				// Remote create/update where the file is active.
 				if ((change.action === "add" || change.action === "update") && newPath && !isDeleted) {
-					this.scheduleWrite(newPath);
+					if (this.isPathSyncable(newPath)) this.scheduleWrite(newPath);
 				}
 			});
 		};
@@ -188,8 +187,11 @@ export class DiskMirror {
 
 				const path = meta.path;
 
-					// Skip if this path is already open (handled by per-file observer policy)
-					if (this.openPaths.has(path)) continue;
+				// Skip excluded paths — CRDT may contain files excluded on this device
+				if (!this.isPathSyncable(path)) continue;
+
+				// Skip if this path is already open (handled by per-file observer policy)
+				if (this.openPaths.has(path)) continue;
 
 				this.log(`afterTxn: remote content change to closed file "${path}"`);
 				this.scheduleWrite(path);
@@ -417,6 +419,10 @@ export class DiskMirror {
 
 	async flushWrite(path: string, force = false): Promise<void> {
 		path = normalizePath(path);
+		if (!this.isPathSyncable(path)) {
+			this.log(`flushWrite: "${path}" is excluded, skipping`);
+			return;
+		}
 		return this.runPathWriteLocked(path, () => this.flushWriteUnlocked(path, force));
 	}
 
@@ -603,6 +609,15 @@ export class DiskMirror {
 			} catch (err) {
 				console.error(`[yaos] handleRemoteRename failed for "${oldNormalized}" -> "${newNormalized}":`, err);
 			}
+		}
+
+		// Only write/observe the new path if it is syncable on this device.
+		// A remote rename into an excluded folder should not create the file locally.
+		if (!this.isPathSyncable(newNormalized)) {
+			if (wasOpen) {
+				this.openPaths.delete(newNormalized);
+			}
+			return;
 		}
 
 		if (wasOpen) {
@@ -802,23 +817,18 @@ export class DiskMirror {
 	}
 
 	private getActiveSuppression(path: string): SuppressionEntry | null {
-		path = normalizePath(path);
-		const entry = this.suppressedPaths.get(path);
-		if (!entry) return null;
-		if (Date.now() < entry.expiresAt) {
-			return entry;
-		}
-		this.suppressedPaths.delete(path);
-		return null;
+		return this.suppressedPaths.get(normalizePath(path)) ?? null;
 	}
 
 	private async suppressWrite(path: string, content: string): Promise<void> {
 		// Record the exact content we wrote so vault modify/create events can
-		// acknowledge our own write by observed state, not just timing.
+		// acknowledge our own write by content fingerprint rather than timing.
+		// No TTL: the entry is consumed on the first matching event (or replaced
+		// on the next write), so slow I/O cannot cause the suppression to expire
+		// before the event arrives.
 		const fingerprint = await this.fingerprintContent(content);
 		this.suppressedPaths.set(normalizePath(path), {
 			kind: "write",
-			expiresAt: Date.now() + SUPPRESS_MS,
 			expectedBytes: fingerprint.bytes,
 			expectedHash: fingerprint.hash,
 		});
@@ -827,7 +837,6 @@ export class DiskMirror {
 	private suppressDelete(path: string): void {
 		this.suppressedPaths.set(normalizePath(path), {
 			kind: "delete",
-			expiresAt: Date.now() + SUPPRESS_MS,
 		});
 	}
 
