@@ -48,7 +48,7 @@ console.log("\n--- Test 1: bound-file recovery applies one content authority ---
 	].join("\n");
 
 	const fixed = makeText(crdt);
-	applyDiffToYText(fixed.ytext, crdt, disk, "disk-sync-recover-bound");
+	applyDiffToYText(fixed.ytext, disk, "disk-sync-recover-bound");
 	assert(
 		fixed.ytext.toString() === disk,
 		"fixed recovery leaves CRDT at the chosen disk content",
@@ -56,8 +56,8 @@ console.log("\n--- Test 1: bound-file recovery applies one content authority ---
 	fixed.doc.destroy();
 
 	const oldAmplifier = makeText(crdt);
-	applyDiffToYText(oldAmplifier.ytext, crdt, disk, "disk-sync-recover-bound");
-	applyDiffToYText(oldAmplifier.ytext, disk, staleEditor, "editor-health-heal");
+	applyDiffToYText(oldAmplifier.ytext, disk, "disk-sync-recover-bound");
+	applyDiffToYText(oldAmplifier.ytext, staleEditor, "editor-health-heal");
 	assert(
 		oldAmplifier.ytext.toString() === staleEditor,
 		"old disk-then-heal sequence can reapply stale editor content",
@@ -95,8 +95,7 @@ console.log("\n--- Test 2: repeated disk-authority recovery does not amplify sta
 
 	const state = makeText(crdt);
 	for (let i = 0; i < 5; i++) {
-		const before = state.ytext.toString();
-		applyDiffToYText(state.ytext, before, disk, "disk-sync-recover-bound");
+		applyDiffToYText(state.ytext, disk, "disk-sync-recover-bound");
 	}
 
 	assert(state.ytext.toString() === disk, "repeated disk-authority recovery stays at disk content");
@@ -131,8 +130,7 @@ console.log("\n--- Test 3: post-recovery health retries stay bounded without edi
 
 	const state = makeText(crdt);
 	for (let i = 0; i < 5; i++) {
-		const before = state.ytext.toString();
-		applyDiffToYText(state.ytext, before, disk, "disk-sync-recover-bound");
+		applyDiffToYText(state.ytext, disk, "disk-sync-recover-bound");
 		// Automatic health retries should be repair/rebind only and therefore
 		// should not write stale editor content back into Y.Text.
 		const afterRecovery = state.ytext.toString();

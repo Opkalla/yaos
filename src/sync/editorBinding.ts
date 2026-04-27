@@ -312,7 +312,7 @@ export class EditorBindingManager {
 				`heal: applying local editor content to "${file.path}" ` +
 				`(${crdtContent.length} -> ${currentContent.length} chars, reason=${reason})`,
 			);
-			applyDiffToYText(target.ytext, crdtContent, currentContent, "editor-health-heal");
+			applyDiffToYText(target.ytext, currentContent, "editor-health-heal");
 		}
 
 		return this.repair(view, deviceName, reason);

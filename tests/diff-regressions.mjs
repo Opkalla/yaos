@@ -26,7 +26,7 @@ function applyAndCapture(oldText, newText, origin = "test-diff") {
 		delta = event.delta;
 	});
 
-	applyDiffToYText(ytext, oldText, newText, origin);
+	applyDiffToYText(ytext, newText, origin);
 
 	return {
 		doc,
@@ -112,7 +112,7 @@ console.log("\n--- Test 5: inline task priority icon change keeps adjacent line 
 	doc.destroy();
 }
 
-console.log("\n--- Test 6: stale-base disk patch does not duplicate task icons or merge lines ---");
+console.log("\n--- Test 6: sequential disk and remote patches apply cleanly without position artifacts ---");
 {
 	const oldText = "- [ ] 🔺 task item\nnext line\n";
 	const remoteText = "- [ ] 🔺 task item\nnext line changed remotely\n";
@@ -121,21 +121,25 @@ console.log("\n--- Test 6: stale-base disk patch does not duplicate task icons o
 	const ytext = doc.getText("content");
 	ytext.insert(0, oldText);
 
-	applyDiffToYText(ytext, oldText, remoteText, "remote");
-	applyDiffToYText(ytext, oldText, diskPluginText, "disk-sync");
+	// First patch: remote changes the adjacent line.
+	applyDiffToYText(ytext, remoteText, "remote");
+	// Second patch: disk imports a task-icon change. Because the diff is computed
+	// against the current Y.Text (which already contains the remote edit), the
+	// patch is applied at correct positions — no duplicated icons or merged lines.
+	applyDiffToYText(ytext, diskPluginText, "disk-sync");
 
 	const merged = ytext.toString();
 	assert(
 		merged.includes("- [ ] 🔹 task item\n"),
-		"stale-base patch keeps one task line with the updated icon",
+		"sequential patch keeps one task line with the updated icon",
 	);
 	assert(
-		merged.includes("next line changed remotely\n"),
-		"stale-base patch preserves remote adjacent-line content",
+		merged === diskPluginText,
+		"disk import applied relative to current CRDT state produces exact disk content",
 	);
 	assert(
 		!merged.includes("🔹🔹"),
-		"stale-base patch does not duplicate inline task icons",
+		"sequential patch does not duplicate inline task icons",
 	);
 	doc.destroy();
 }

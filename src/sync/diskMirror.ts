@@ -134,7 +134,7 @@ export class DiskMirror {
 
 				// Remote tombstone transition.
 				if (newPath && isDeleted && !wasDeleted) {
-					void this.handleRemoteDelete(newPath);
+					if (this.isPathSyncable(newPath)) void this.handleRemoteDelete(newPath);
 					return;
 				}
 

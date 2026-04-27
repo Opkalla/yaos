@@ -1979,7 +1979,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				this.log(
 					`syncFileFromDisk: applying diff to "${file.path}" (${crdtContent.length} -> ${content.length} chars)`,
 				);
-				applyDiffToYText(existingText, crdtContent, content, "disk-sync");
+				applyDiffToYText(existingText, content, "disk-sync");
 			} else {
 				if (this.shouldBlockFrontmatterIngest(
 					file.path,
@@ -2116,7 +2116,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 					diskLength: content.length,
 					crdtLength: crdtContent?.length ?? null,
 				});
-				applyDiffToYText(existingText, crdtContent ?? "", content, "disk-sync-recover-bound");
+				applyDiffToYText(existingText, content, "disk-sync-recover-bound");
 			} else {
 				if (this.shouldBlockFrontmatterIngest(
 					file.path,
@@ -2190,7 +2190,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 					`syncFileFromDisk: recovering "${file.path}" ` +
 					`(editor-bound external disk edit while idle: ${crdtContent?.length ?? 0} -> ${content.length} chars)`,
 				);
-				applyDiffToYText(existingText, crdtContent ?? "", content, "disk-sync-open-idle-recover");
+				applyDiffToYText(existingText, content, "disk-sync-open-idle-recover");
 			} else {
 				if (this.shouldBlockFrontmatterIngest(
 					file.path,

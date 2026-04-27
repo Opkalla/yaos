@@ -17,26 +17,32 @@ type DiffOp =
 	| { type: "insert"; text: string };
 
 /**
- * Compute a character diff between `oldText` and `newText`, then
- * apply it to the Y.Text as a series of targeted operations.
+ * Compute a character diff between the current Y.Text state and `newText`,
+ * then apply it to the Y.Text as a series of targeted operations.
+ *
+ * The current Y.Text is read *inside* the transaction so that positions are
+ * always computed relative to the live CRDT state at mutation time, not a
+ * snapshot that may have been invalidated by concurrent remote updates.
  *
  * Uses `fast-diff`, a compact Myers-style diff implementation.
  */
 export function applyDiffToYText(
 	ytext: Y.Text,
-	oldText: string,
 	newText: string,
 	origin: string,
 ): void {
-	if (oldText === newText) return;
-
-	// `fast-diff` gives us a synchronous Myers-style patch without building
-	// the old quadratic DP matrix that used to freeze on large notes.
-	const charOps = diffToCharOps(diff(oldText, newText));
-	if (charOps.length === 0) return;
-
 	// Apply to Y.Text in a single transaction so collaborators see one patch.
+	// Reading the current text inside the transaction ensures the diff positions
+	// are always correct even if remote updates arrive before this runs.
 	ytext.doc?.transact(() => {
+		const currentText = ytext.toString();
+		if (currentText === newText) return;
+
+		// `fast-diff` gives us a synchronous Myers-style patch without building
+		// the old quadratic DP matrix that used to freeze on large notes.
+		const charOps = diffToCharOps(diff(currentText, newText));
+		if (charOps.length === 0) return;
+
 		let cursor = 0;
 		for (const op of charOps) {
 			switch (op.type) {
