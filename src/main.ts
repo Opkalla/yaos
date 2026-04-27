@@ -318,6 +318,12 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		return isBlobSyncable(path, this.excludePatterns, this.app.vault.configDir);
 	}
 
+	/** Called by the settings tab whenever a setting changes that affects derived state. */
+	onSettingsChanged(): void {
+		this.excludePatterns = parseExcludePatterns(this.settings.excludePatterns);
+		this.maxFileSize = this.settings.maxFileSizeKB * 1024;
+	}
+
 	async onload() {
 		const onloadStartedAt = Date.now();
 		await this.loadSettings();
@@ -1089,6 +1095,11 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		for (const path of toImport) {
 			if (this.vaultSync.getTextForPath(path)) {
 				this.log(`importUntracked: "${path}" now in CRDT, skipping`);
+				continue;
+			}
+
+			if (!this.isMarkdownPathSyncable(path)) {
+				this.log(`importUntracked: "${path}" is excluded, skipping`);
 				continue;
 			}
 
