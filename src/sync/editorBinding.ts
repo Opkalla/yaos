@@ -1071,7 +1071,13 @@ export class EditorBindingManager {
 			return null;
 		}
 
-		const currentContent = view.editor.getValue();
+		// Use disk metadata as authoritative for unseeded files: if the file is empty
+		// on disk, seed with "" regardless of what the editor reports. Obsidian reuses
+		// editor leaves, so view.editor.getValue() may return the *previous* file's
+		// content when active-leaf-change fires before the editor has loaded the newly
+		// opened file. That stale content would otherwise propagate to all connected
+		// vaults via the CRDT.
+		const currentContent = file.stat.size === 0 ? "" : view.editor.getValue();
 		const ytext = this.vaultSync.ensureFile(file.path, currentContent, deviceName);
 		if (!ytext) {
 			if (this.isHardTombstonedPath(file.path)) {
