@@ -1,4 +1,4 @@
-import { type App, arrayBufferToHex, MarkdownView, TFile, normalizePath } from "obsidian";
+import { type App, arrayBufferToHex, MarkdownView, TFile, TFolder, normalizePath } from "obsidian";
 import * as Y from "yjs";
 import type { VaultSync } from "./vaultSync";
 import type { EditorBindingManager } from "./editorBinding";
@@ -606,6 +606,23 @@ export class DiskMirror {
 					await this.app.fileManager.renameFile(oldFile, newNormalized);
 				}
 				this.log(`handleRemoteRename: "${oldNormalized}" -> "${newNormalized}"`);
+
+				// After the rename, clean up the source directory if it is now empty.
+				// A folder rename on a remote device fires one rename event per file; once
+				// all files have been moved out, the original folder would otherwise be
+				// left as a visible empty folder on this device.
+				const oldDir = oldNormalized.substring(0, oldNormalized.lastIndexOf("/"));
+				if (oldDir) {
+					try {
+						const oldDirNode = this.app.vault.getAbstractFileByPath(normalizePath(oldDir));
+						if (oldDirNode instanceof TFolder && oldDirNode.children.length === 0) {
+							await this.app.vault.delete(oldDirNode);
+							this.log(`handleRemoteRename: removed empty folder "${oldDir}"`);
+						}
+					} catch {
+						// Non-fatal: folder may already be removed or not accessible
+					}
+				}
 			} catch (err) {
 				console.error(`[yaos] handleRemoteRename failed for "${oldNormalized}" -> "${newNormalized}":`, err);
 			}

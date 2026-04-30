@@ -2,7 +2,7 @@
  * Shared type definitions for the vault CRDT sync plugin.
  */
 
-import { isExcluded } from "./sync/exclude";
+import { isExcluded, isIncluded } from "./sync/exclude";
 
 // -------------------------------------------------------------------
 // Markdown CRDT types
@@ -81,8 +81,9 @@ export const ORIGIN_SEED = "vault-crdt-seed";
  * Check if a vault-relative path is a markdown file eligible for CRDT sync.
  * Single choke point for all ".md" checks in the codebase.
  */
-export function isMarkdownSyncable(path: string, excludePatterns: string[], configDir: string): boolean {
+export function isMarkdownSyncable(path: string, excludePatterns: string[], includePaths: string[], configDir: string): boolean {
 	if (!path.endsWith(".md")) return false;
+	if (!isIncluded(path, includePaths)) return false;
 	return !isExcluded(path, excludePatterns, configDir);
 }
 
@@ -91,7 +92,8 @@ export function isMarkdownSyncable(path: string, excludePatterns: string[], conf
  * blob/attachment sync. Excludes the config directory, .trash/, user patterns,
  * and markdown files (handled by the CRDT text pipeline).
  */
-export function isBlobSyncable(path: string, excludePatterns: string[], configDir: string): boolean {
+export function isBlobSyncable(path: string, excludePatterns: string[], includePaths: string[], configDir: string): boolean {
 	if (path.endsWith(".md")) return false;
+	if (!isIncluded(path, includePaths)) return false;
 	return !isExcluded(path, excludePatterns, configDir);
 }

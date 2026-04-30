@@ -10,7 +10,7 @@ import { SCHEMA_VERSION } from "./sync/vaultSync";
 import { EditorBindingManager } from "./sync/editorBinding";
 import { DiskMirror } from "./sync/diskMirror";
 import { BlobSyncManager, type BlobQueueSnapshot } from "./sync/blobSync";
-import { parseExcludePatterns } from "./sync/exclude";
+import { parseExcludePatterns, parseIncludePaths } from "./sync/exclude";
 import {
 	fetchServerCapabilities,
 	type ServerCapabilities,
@@ -228,6 +228,9 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 	/** Parsed exclude patterns from settings. */
 	private excludePatterns: string[] = [];
 
+	/** Parsed include paths from settings (empty = sync everything). */
+	private includePaths: string[] = [];
+
 	/** Max file size in characters (derived from settings KB). */
 	private maxFileSize = 0;
 
@@ -311,16 +314,17 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 	private blobDownloadGateStartupReady = false;
 
 	private isMarkdownPathSyncable(path: string): boolean {
-		return isMarkdownSyncable(path, this.excludePatterns, this.app.vault.configDir);
+		return isMarkdownSyncable(path, this.excludePatterns, this.includePaths, this.app.vault.configDir);
 	}
 
 	private isBlobPathSyncable(path: string): boolean {
-		return isBlobSyncable(path, this.excludePatterns, this.app.vault.configDir);
+		return isBlobSyncable(path, this.excludePatterns, this.includePaths, this.app.vault.configDir);
 	}
 
 	/** Called by the settings tab whenever a setting changes that affects derived state. */
 	onSettingsChanged(): void {
 		this.excludePatterns = parseExcludePatterns(this.settings.excludePatterns);
+		this.includePaths = parseIncludePaths(this.settings.includePaths);
 		this.maxFileSize = this.settings.maxFileSizeKB * 1024;
 	}
 
@@ -401,6 +405,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 
 		// Parse exclude patterns and file size limit from settings
 		this.excludePatterns = parseExcludePatterns(this.settings.excludePatterns);
+		this.includePaths = parseIncludePaths(this.settings.includePaths);
 		this.maxFileSize = this.settings.maxFileSizeKB * 1024;
 
 		this.applyCursorVisibility();
@@ -435,6 +440,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		try {
 			this.idbDegradedHandled = false;
 			this.excludePatterns = parseExcludePatterns(this.settings.excludePatterns);
+			this.includePaths = parseIncludePaths(this.settings.includePaths);
 			this.maxFileSize = this.settings.maxFileSizeKB * 1024;
 			this.applyCursorVisibility();
 			if (this.enforceCompatibilityGuard("init-sync-preflight")) {
@@ -1070,6 +1076,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				const blobResult = this.blobSync.reconcile(
 					mode,
 					this.excludePatterns,
+					this.includePaths,
 				);
 				this.log(
 					`Blob reconciliation [${mode}]: ` +
@@ -2074,6 +2081,22 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			(state) => state.editorMatchesDisk && !state.editorMatchesCrdt,
 		);
 		if (localOnlyViews.length > 0) {
+			// Guard: if the yCollab binding is healthy for all affected views, the CRDT
+			// change simply hasn't propagated to the editor yet (e.g. Obsidian autosave
+			// fired before yCollab applied the remote update). Applying the stale disk
+			// content back to the CRDT would reverse the remote edit and cause a loop.
+			// Trust yCollab to sync CRDT→editor and skip recovery in this case.
+			const allBindingsHealthy = localOnlyViews.every((state) => {
+				const health = this.editorBindings?.getBindingHealthForView(state.view);
+				return health?.healthy === true || health?.settling === true;
+			});
+			if (allBindingsHealthy) {
+				this.log(
+					`syncFileFromDisk: skipping "${file.path}" (editor=disk≠crdt but binding healthy — yCollab applying remote update)`,
+				);
+				return true;
+			}
+
 			this.trace("trace", "bound-file-local-only-divergence", {
 				path: file.path,
 				diskLength: content.length,
@@ -2987,7 +3010,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 
 		if (runInitialReconcile) {
 			try {
-				const result = this.blobSync.reconcile("authoritative", this.excludePatterns);
+				const result = this.blobSync.reconcile("authoritative", this.excludePatterns, this.includePaths);
 				this.log(
 					`Attachment reconcile (${reason}): queued ` +
 					`${result.uploadQueued} uploads, ${result.downloadQueued} downloads, ${result.skipped} skipped`,
@@ -3634,6 +3657,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		await this.refreshServerCapabilities();
 			await this.saveSettings();
 			this.excludePatterns = parseExcludePatterns(this.settings.excludePatterns);
+			this.includePaths = parseIncludePaths(this.settings.includePaths);
 			this.maxFileSize = this.settings.maxFileSizeKB * 1024;
 			this.applyCursorVisibility();
 			new Notice("Server linked. Starting sync...", 6000);

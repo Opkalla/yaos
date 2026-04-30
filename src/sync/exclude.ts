@@ -59,3 +59,25 @@ export function parseExcludePatterns(raw: string): string[] {
 		.map((p) => p.trim())
 		.filter((p) => p.length > 0);
 }
+
+/**
+ * Parse the comma-separated includePaths setting into a list of
+ * trimmed, non-empty prefixes.
+ */
+export function parseIncludePaths(raw: string): string[] {
+	return raw
+		.split(",")
+		.map((p) => p.trim())
+		.filter((p) => p.length > 0);
+}
+
+/**
+ * Check if a path matches the include list.
+ * If includePaths is empty, all paths pass (sync everything).
+ * If non-empty, only paths that match at least one prefix pass.
+ */
+export function isIncluded(path: string, includePaths: string[]): boolean {
+	if (includePaths.length === 0) return true;
+	const normalizedPath = normalizePrefix(path);
+	return includePaths.some((prefix) => matchesPrefix(normalizedPath, normalizePrefix(prefix)));
+}

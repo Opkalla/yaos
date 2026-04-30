@@ -491,6 +491,7 @@ export class BlobSyncManager {
 	reconcile(
 		mode: "conservative" | "authoritative",
 		excludePatterns: string[],
+		includePaths: string[] = [],
 	): { uploadQueued: number; downloadQueued: number; skipped: number } {
 		let uploadQueued = 0;
 		let downloadQueued = 0;
@@ -499,7 +500,7 @@ export class BlobSyncManager {
 		// Collect non-md, non-excluded disk files
 		const diskBlobs = new Map<string, TFile>();
 		for (const file of this.app.vault.getFiles()) {
-			if (!isBlobSyncable(file.path, excludePatterns, this.app.vault.configDir)) continue;
+			if (!isBlobSyncable(file.path, excludePatterns, includePaths, this.app.vault.configDir)) continue;
 
 			// Size check
 			if (this.maxSize > 0 && file.stat.size > this.maxSize) continue;

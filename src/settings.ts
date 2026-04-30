@@ -21,6 +21,8 @@ export interface VaultSyncSettings {
 	frontmatterGuardEnabled: boolean;
 	/** Comma-separated path prefixes to exclude from sync. */
 	excludePatterns: string;
+	/** Comma-separated folder paths to sync exclusively. Empty = sync everything. */
+	includePaths: string;
 	/** Maximum file size in KB to sync via CRDT. Files larger are skipped. */
 	maxFileSizeKB: number;
 	/**
@@ -54,6 +56,7 @@ export const DEFAULT_SETTINGS: VaultSyncSettings = {
 	debug: false,
 	frontmatterGuardEnabled: true,
 	excludePatterns: "",
+	includePaths: "",
 	maxFileSizeKB: 2048,
 	externalEditPolicy: "always",
 	enableAttachmentSync: true,
@@ -454,6 +457,20 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		addSectionHeading(containerEl, "What syncs");
+			new Setting(containerEl)
+				.setName("Sync only these folders")
+				.setDesc("Comma-separated folder paths to sync exclusively. If set, only files inside these folders are synced. Leave empty to sync everything (minus excluded paths). Example: Projects/Shared/, Team Notes/")
+				.addText((text) =>
+					text
+						.setPlaceholder("Example: Projects/Shared/, Team Notes/")
+						.setValue(this.plugin.settings.includePaths)
+						.onChange(async (value) => {
+							this.plugin.settings.includePaths = value;
+							await this.plugin.saveSettings();
+							this.plugin.onSettingsChanged();
+						}),
+			);
+
 			new Setting(containerEl)
 				.setName("Exclude paths")
 				.setDesc("Comma-separated path prefixes to skip. Example: templates/, .trash/, daily-notes/")
