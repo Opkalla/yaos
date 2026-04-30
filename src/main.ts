@@ -2086,15 +2086,23 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			// fired before yCollab applied the remote update). Applying the stale disk
 			// content back to the CRDT would reverse the remote edit and cause a loop.
 			// Trust yCollab to sync CRDT→editor and skip recovery in this case.
-			const allBindingsHealthy = localOnlyViews.every((state) => {
-				const health = this.editorBindings?.getBindingHealthForView(state.view);
-				return health?.healthy === true || health?.settling === true;
-			});
-			if (allBindingsHealthy) {
-				this.log(
-					`syncFileFromDisk: skipping "${file.path}" (editor=disk≠crdt but binding healthy — yCollab applying remote update)`,
-				);
-				return true;
+			//
+			// Exception: for create events, disk content is always authoritative. The CRDT
+			// entry was seeded locally (possibly with stale editor content from the
+			// active-leaf-change race, where view.editor.getValue() returns the previous
+			// file's content before the editor has loaded the new file). A legitimate remote
+			// update cannot have arrived within the ~350ms settle window of file creation.
+			if (sourceReason !== "create") {
+				const allBindingsHealthy = localOnlyViews.every((state) => {
+					const health = this.editorBindings?.getBindingHealthForView(state.view);
+					return health?.healthy === true || health?.settling === true;
+				});
+				if (allBindingsHealthy) {
+					this.log(
+						`syncFileFromDisk: skipping "${file.path}" (editor=disk≠crdt but binding healthy — yCollab applying remote update)`,
+					);
+					return true;
+				}
 			}
 
 			this.trace("trace", "bound-file-local-only-divergence", {
@@ -2190,7 +2198,11 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		);
 		if (crdtOnlyViews.length > 0) {
 			const lastEditorActivity = this.editorBindings?.getLastEditorActivityForPath(file.path) ?? null;
-			const hasRecentEditorActivity = lastEditorActivity != null
+			// For create events, bypass the recent-activity guard: the activity was yCollab
+			// applying stale content that was seeded in the active-leaf-change race, not a
+			// real user edit. Disk content (empty for a new file) must win.
+			const hasRecentEditorActivity = sourceReason !== "create"
+				&& lastEditorActivity != null
 				&& (Date.now() - lastEditorActivity) < OPEN_FILE_EXTERNAL_EDIT_IDLE_GRACE_MS;
 			if (hasRecentEditorActivity) {
 				this.log(`syncFileFromDisk: skipping "${file.path}" (editor-bound, disk lag)`);
