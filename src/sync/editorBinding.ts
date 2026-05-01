@@ -961,6 +961,21 @@ export class EditorBindingManager {
 
 		try {
 			this.clearLocalCursor(`${action}-pre-reconfigure`);
+			// If the Y.Text is empty (e.g., a new file seeded with "") but the editor
+			// still holds a previous file's content, clear the editor before applying
+			// yCollab. Without this, when Obsidian later dispatches the file-load
+			// transaction (replacing stale content with the new file's content), yCollab's
+			// update hook fires and tries to delete stale.length chars from an empty
+			// Y.Text — Yjs throws "Length exceeded". Clearing first ensures both the
+			// editor and Y.Text are empty before yCollab starts observing, so no
+			// spurious diff is generated. The compartment holds no yCollab at this
+			// point (unbind ran before resolveBindingTarget), so this dispatch does
+			// not touch any Y.Text.
+			if (ytext.length === 0 && cm.state.doc.length > 0) {
+				cm.dispatch({
+					changes: { from: 0, to: cm.state.doc.length, insert: "" },
+				});
+			}
 			cm.dispatch({
 				effects: this.compartment.reconfigure(collabExtension),
 			});
