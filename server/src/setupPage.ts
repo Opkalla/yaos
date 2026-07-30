@@ -555,16 +555,20 @@ export function renderSetupPage(options: SetupPageOptions): RenderedPage {
         successFlow.classList.add("show");
 
         // Confirm automatically once the plugin makes its first
-        // authenticated request to this server.
+        // authenticated request to this server, then reload: the server is
+        // claimed now, so "/" renders the running page instead of leaving
+        // this setup flow (and its clickable buttons) on screen, where a
+        // stray second click could confuse an already-completed setup.
         var connectStatusEl = document.getElementById("connect-status");
         var connectPoll = setInterval(function () {
           fetch("/api/setup-status").then(function (r) { return r.json(); }).then(function (s) {
             if (s && s.clientConnected) {
               clearInterval(connectPoll);
               if (connectStatusEl) {
-                connectStatusEl.textContent = "Device connected \\u2713 \\u2014 sync is up and running.";
+                connectStatusEl.textContent = "Device connected \\u2713 \\u2014 loading your server page\\u2026";
                 connectStatusEl.style.color = "#88ffb8";
               }
+              setTimeout(function () { window.location.reload(); }, 2000);
             }
           }).catch(function () { /* transient; keep polling */ });
         }, 4000);
