@@ -762,7 +762,12 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		const status = this.plugin.getSettingsStatusSummary();
 		const setupIncomplete = !this.plugin.settings.host || !this.plugin.settings.token;
 		const others = this.plugin.getConnectedDevices().filter((d) => !d.isLocal).length;
-		return `${setupIncomplete}|${status.state}|${status.label}|${others}`;
+		// Room states are part of the key so the tab re-renders when a room
+		// connects or drops, not just when the personal sync changes.
+		const rooms = this.plugin.settings.rooms
+			.map((r) => `${r.roomId}:${this.plugin.getRoomStatus(r.roomId).state}`)
+			.join(",");
+		return `${setupIncomplete}|${status.state}|${status.label}|${others}|${rooms}`;
 	}
 
 	/** Re-render when the connection state changes while the tab is open —
@@ -800,32 +805,53 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		const connectionDetails = createDetailsSection(containerEl, "Connection", true);
 		const connectionBody = connectionDetails.createDiv({ cls: "lodestone-settings-details-body" });
 
-		if (setupIncomplete) {
-			const callout = connectionBody.createDiv({ cls: "callout lodestone-settings-setup-callout" });
-			callout.setAttr("data-callout", "warning");
-			callout.createDiv({ cls: "callout-title" }).createSpan({ text: "Connection required" });
-			const calloutContent = callout.createDiv({ cls: "callout-content" });
-			calloutContent.createEl("p", {
-				text: "Lodestone needs a Cloudflare Worker (host) to sync your vault. Deployment is free and takes about 15 seconds.",
-			});
-			calloutContent.createEl("p", {
-				text: "After deployment, open your host URL in a browser, claim the server, then use the setup link.",
-				cls: "lodestone-settings-setup-hint",
-			});
-			new Setting(calloutContent)
-				.setName("Deploy your server")
-				.setDesc("Start one-click deployment in your browser.")
-				.addButton((button) =>
-					button
-						.setButtonText("Open deploy page")
-						.setCta()
-						.onClick(() => {
-							window.open(CLOUDFLARE_DEPLOY_URL, "_blank", "noopener");
-						}),
-				);
+		// A vault with no host of its own but at least one room carrying its own
+		// server is a valid, fully-working configuration — a spoke that joined an
+		// invite and never deployed a server. Don't present it as broken.
+		const roomOnly = setupIncomplete && this.plugin.settings.rooms.some((r) => r.host && r.token);
 
-			// Manual setup — expanded when no connection is configured
-			const manualDetails = createDetailsSection(connectionBody, "Manual setup", true);
+		if (setupIncomplete) {
+			if (roomOnly) {
+				const card = connectionBody.createDiv({ cls: "lodestone-settings-status-card" });
+				const statusLine = card.createDiv({ cls: "lodestone-settings-status-line" });
+				const titleWrap = statusLine.createDiv({ cls: "lodestone-settings-status-copy" });
+				titleWrap.createEl("div", { text: "Room sync only", cls: "lodestone-settings-status-title" });
+				titleWrap.createEl("div", {
+					text: "This vault has no host of its own. Shared folders still sync through the rooms below. "
+						+ "Deploy a host to also sync this whole vault across your own devices.",
+					cls: "lodestone-settings-status-subtitle",
+				});
+				statusLine.createSpan({
+					text: "No host",
+					cls: "lodestone-settings-status-badge is-busy",
+				});
+			} else {
+				const callout = connectionBody.createDiv({ cls: "callout lodestone-settings-setup-callout" });
+				callout.setAttr("data-callout", "warning");
+				callout.createDiv({ cls: "callout-title" }).createSpan({ text: "Connection required" });
+				const calloutContent = callout.createDiv({ cls: "callout-content" });
+				calloutContent.createEl("p", {
+					text: "Lodestone needs a Cloudflare Worker (host) to sync your vault. Deployment is free and takes about 15 seconds.",
+				});
+				calloutContent.createEl("p", {
+					text: "After deployment, open your host URL in a browser, claim the server, then use the setup link.",
+					cls: "lodestone-settings-setup-hint",
+				});
+				new Setting(calloutContent)
+					.setName("Deploy your server")
+					.setDesc("Start one-click deployment in your browser.")
+					.addButton((button) =>
+						button
+							.setButtonText("Open deploy page")
+							.setCta()
+							.onClick(() => {
+								window.open(CLOUDFLARE_DEPLOY_URL, "_blank", "noopener");
+							}),
+					);
+			}
+
+			// Manual setup — expanded only when there's nothing working at all.
+			const manualDetails = createDetailsSection(connectionBody, "Manual setup", !roomOnly);
 			const manualBody = manualDetails.createDiv({ cls: "lodestone-settings-details-body" });
 			manualBody.createEl("p", {
 				text: "Claim your server in the browser, then use the setup link. You can also paste your connection details here directly.",
@@ -896,7 +922,9 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 		}
 
 		// ── Section 2: Rooms ─────────────────────────────────────────────────
-		if (!setupIncomplete) {
+		// Always shown: rooms can carry their own server connection, so room
+		// membership and its live state are meaningful even with no host here.
+		{
 			const roomsDetails = createDetailsSection(containerEl, "Rooms", true);
 			const roomsBody = roomsDetails.createDiv({ cls: "lodestone-settings-details-body" });
 			const { rooms } = this.plugin.settings;
@@ -912,16 +940,26 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 					const titleLine = card.createDiv({ cls: "lodestone-settings-status-line" });
 					const titleWrap = titleLine.createDiv({ cls: "lodestone-settings-status-copy" });
 					titleWrap.createEl("div", { text: room.displayName, cls: "lodestone-settings-status-title" });
+					const roleText = room.role === "hub"
+						? `Hub — sharing ${room.includePaths.length} folder${room.includePaths.length !== 1 ? "s" : ""}`
+						: "Spoke — receiving from hub";
 					titleWrap.createEl("div", {
-						text: room.role === "hub"
-							? `Sharing ${room.includePaths.length} folder${room.includePaths.length !== 1 ? "s" : ""}`
-							: `Receiving from hub`,
+						text: roleText,
 						cls: "lodestone-settings-status-subtitle",
 					});
+					// Badge is the room's live connection state, not its role —
+					// the role is static and belongs in the subtitle.
+					const roomStatus = this.plugin.getRoomStatus(room.roomId);
 					titleLine.createSpan({
-						text: room.role === "hub" ? "Hub" : "Spoke",
-						cls: `lodestone-settings-status-badge ${room.role === "hub" ? "is-connected" : "is-busy"}`,
+						text: roomStatus.label,
+						cls: `lodestone-settings-status-badge ${statusClass(roomStatus.state)}`,
 					});
+
+					const roomServer = room.host
+						?? (this.plugin.settings.host
+							? `${this.plugin.settings.host} (vault host)`
+							: "Not configured");
+					addCardRow(card, "Server", roomServer);
 
 					if (room.role === "hub" && room.includePaths.length > 0) {
 						const pathList = card.createDiv({ cls: "lodestone-settings-details-body" });
@@ -982,13 +1020,22 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 			}
 
 			const roomsActions = roomsBody.createDiv({ cls: "modal-button-container lodestone-settings-status-actions" });
-			roomsActions.createEl("button", { text: "Create a room", cls: rooms.length === 0 ? "mod-cta" : "" })
-				.addEventListener("click", () => {
-					new CreateRoomModal(this.app, async (name, paths) => {
-						await this.plugin.createRoom(name, paths);
-						this.display();
-					}).open();
-				});
+			// Hosting a room requires this vault's own server — the room is created
+			// on it. Joining does not: the invite brings its own host and token.
+			const createBtn = roomsActions.createEl("button", {
+				text: "Create a room",
+				cls: rooms.length === 0 && !setupIncomplete ? "mod-cta" : "",
+			});
+			if (setupIncomplete) {
+				createBtn.disabled = true;
+				createBtn.title = "Hosting a room needs this vault's own host. Deploy a server first.";
+			}
+			createBtn.addEventListener("click", () => {
+				new CreateRoomModal(this.app, async (name, paths) => {
+					await this.plugin.createRoom(name, paths);
+					this.display();
+				}).open();
+			});
 			roomsActions.createEl("button", { text: "Join with invite link" })
 				.addEventListener("click", () => {
 					new JoinRoomModal(this.app, async (inviteUrl, pathAliases) => {

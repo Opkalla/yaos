@@ -403,6 +403,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 
 	/** Called by the settings tab whenever a setting changes that affects derived state. */
 	maybeStartSync(): void {
+		if (!this.settings.host || !this.settings.token) return;
 		if (!this.vaultSync) {
 			void this.initSync();
 		}
@@ -491,6 +492,18 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			void this.syncUpdateMetadataToServer("startup-background");
 		}
 
+		if (!this.settings.host || !this.settings.token) {
+			// No personal sync — but rooms carrying their own host/token are
+			// independent of it and must still come up. This is the normal state
+			// for a spoke that joined an invite without ever configuring a
+			// server of its own.
+			if (this.hasIndependentRooms()) {
+				await this.initRoomOnlyMode();
+				finishOnload("room-only");
+				return;
+			}
+		}
+
 		if (!this.settings.host) {
 			this.log("Host not configured — sync disabled");
 			new Notice("Configure the server host in settings to enable sync.");
@@ -534,6 +547,59 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 
 		void this.initSync();
 		finishOnload("sync-started");
+	}
+
+	/**
+	 * Bring up room sync for a vault that has no personal connection of its own.
+	 *
+	 * This is a first-class configuration, not a degraded one: a spoke can join
+	 * an invite and never configure a server. It needs everything the normal
+	 * startup path wires up except the personal VaultSync — vault events (so
+	 * local edits reach the room), commands, and the status interval. `reconciled`
+	 * is set because every vault event is gated on it; there is nothing to
+	 * reconcile here since each room seeds itself in startRoomSync.
+	 */
+	private async initRoomOnlyMode(): Promise<void> {
+		this.log("No personal connection — starting in room-only mode");
+		this.trace("trace", "startup-room-only-start", {
+			rooms: this.settings.rooms.length,
+			independentRooms: this.settings.rooms.filter((r) => r.host && r.token).length,
+		});
+
+		this.excludePatterns = parseExcludePatterns(this.settings.excludePatterns);
+		this.includePaths = parseIncludePaths(this.settings.includePaths);
+		this.maxFileSize = this.settings.maxFileSizeKB * 1024;
+		this.applyCursorVisibility();
+
+		if (!this.vaultEventsRegistered) {
+			this.registerVaultEvents();
+			this.vaultEventsRegistered = true;
+		}
+		if (!this.commandsRegistered) {
+			this.registerCommands();
+			this.commandsRegistered = true;
+		}
+
+		if (!this.statusInterval) {
+			this.statusInterval = setInterval(() => {
+				this.refreshStatusBar();
+			}, 3000);
+			this.register(() => {
+				if (this.statusInterval) clearInterval(this.statusInterval);
+			});
+		}
+
+		await this.startAllRooms("independent");
+
+		// Nothing to reconcile without a personal Y.Doc, but vault events are
+		// gated on this flag and room files still need to flow disk → CRDT.
+		this.reconciled = true;
+		this.bindAllOpenEditors();
+		this.refreshStatusBar();
+		this.log("Room-only startup complete");
+		this.trace("trace", "startup-room-only-complete", {
+			startedRooms: this.roomSyncs.size,
+		});
 	}
 
 	private async initSync(): Promise<void> {
@@ -764,8 +830,10 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				void this.triggerDailySnapshot();
 			}
 
-			// Start room syncs after personal sync is up.
-			await this.startAllRooms();
+			// Start room syncs after personal sync is up. Rooms with their own
+			// host/token may already be running (started in onload); startRoomSync
+			// is idempotent.
+			await this.startAllRooms("all");
 		} catch (err) {
 			console.error("[lodestone] Failed to initialize sync:", err);
 			new Notice(`Lodestone: failed to initialize — ${formatUnknown(err)}`);
@@ -2930,6 +2998,34 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		};
 	}
 
+	/** True when this vault has no personal server connection configured. */
+	hasPersonalConnection(): boolean {
+		return !!this.settings.host && !!this.settings.token;
+	}
+
+	/**
+	 * Live connection state for one room. Rooms sync over their own provider,
+	 * independent of the personal sync reported by computeSyncStatus().
+	 */
+	getRoomStatus(roomId: string): { state: SyncStatus; label: string } {
+		const sync = this.roomSyncs.get(roomId);
+		if (!sync) return { state: "disconnected", label: "Not started" };
+		if (sync.fatalAuthError) return { state: "unauthorized", label: "Unauthorized" };
+		if (sync.idbError) return { state: "error", label: "Error" };
+		if (sync.connected) return { state: "connected", label: "Connected" };
+		if (sync.localReady) return { state: "offline", label: "Offline" };
+		return { state: "disconnected", label: "Connecting..." };
+	}
+
+	/** How many of this vault's rooms are currently connected to their server. */
+	getConnectedRoomCount(): number {
+		let count = 0;
+		for (const room of this.settings.rooms) {
+			if (this.roomSyncs.get(room.roomId)?.connected) count++;
+		}
+		return count;
+	}
+
 	updateAwarenessDeviceName(name: string): void {
 		this.vaultSync?.provider?.awareness?.setLocalStateField("user", {
 			name: name || "unnamed",
@@ -2953,7 +3049,24 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 
 	private updateStatusBar(state: SyncStatus): void {
 		if (!this.statusBarEl) return;
-		let text = this.getSyncStatusLabel(state);
+
+		// Rooms sync independently of the personal connection, so the bar has to
+		// describe both. Only the aggregate count goes here — per-room detail
+		// lives in settings, so a flapping room can't churn this every tick.
+		const roomCount = this.settings.rooms.length;
+		const roomSummary = roomCount > 0
+			? `${this.getConnectedRoomCount()}/${roomCount} room${roomCount !== 1 ? "s" : ""}`
+			: "";
+
+		let text: string;
+		if (!this.hasPersonalConnection() && roomCount > 0) {
+			// Room-only vault: reporting the (nonexistent) personal sync as
+			// "Disconnected" reads as total failure when sync is in fact working.
+			text = `Lodestone: ${roomSummary} connected`;
+		} else {
+			text = this.getSyncStatusLabel(state);
+			if (roomSummary) text += ` · ${roomSummary}`;
+		}
 
 		// Append blob transfer progress if active
 		const transfer = this.blobSync?.transferStatus;
@@ -3566,10 +3679,30 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		return null;
 	}
 
-	private async startAllRooms(): Promise<void> {
+	/**
+	 * Start room syncs.
+	 *
+	 * `independent` starts only rooms that carry their own host+token (set on
+	 * join from the invite link, or on create by the hub). Those rooms do not
+	 * depend on this vault's personal sync at all, so they must start even when
+	 * the vault has no connection of its own — otherwise a room-only vault
+	 * (a spoke that never configured its own host) silently stops syncing on
+	 * the next Obsidian restart.
+	 *
+	 * `all` additionally starts rooms that inherit the vault's connection.
+	 * Those have to wait until personal sync has reconciled, or their DiskMirror
+	 * races the main one over the same files.
+	 */
+	private async startAllRooms(scope: "independent" | "all"): Promise<void> {
 		for (const room of this.settings.rooms) {
+			if (scope === "independent" && !(room.host && room.token)) continue;
 			await this.startRoomSync(room);
 		}
+	}
+
+	/** True when at least one room can sync without this vault's own connection. */
+	private hasIndependentRooms(): boolean {
+		return this.settings.rooms.some((r) => !!r.host && !!r.token);
 	}
 
 	private async stopAllRooms(): Promise<void> {
