@@ -3,6 +3,21 @@ import * as QRCode from "qrcode";
 import type VaultCrdtSyncPlugin from "./main";
 import { randomBase64Url } from "./utils/base64url";
 import { mintRoomToken } from "./sync/serverCapabilities";
+import {
+	DEFAULT_ROOM_ACCESS_TIER,
+	ROOM_ACCESS_TIER_DESCRIPTIONS,
+	ROOM_ACCESS_TIER_LABELS,
+	normalizeRoomAccessTier,
+	type RoomAccessTier,
+} from "./types";
+
+export {
+	DEFAULT_ROOM_ACCESS_TIER,
+	ROOM_ACCESS_TIER_DESCRIPTIONS,
+	ROOM_ACCESS_TIER_LABELS,
+	normalizeRoomAccessTier,
+	type RoomAccessTier,
+};
 
 /** Controls how external disk edits (git, other editors) are imported into CRDT. */
 export type ExternalEditPolicy = "always" | "closed-only" | "never";
@@ -41,6 +56,14 @@ export interface RoomConfig {
 	 */
 	host?: string;
 	token?: string;
+	/**
+	 * What spokes may do in this room. The hub owns this value and publishes it
+	 * into the room Y.Doc (`sys.roomAccessTier`), which is authoritative so a
+	 * change reaches every spoke live. A spoke also stores whatever the invite
+	 * carried, as the value to use before the first sync completes.
+	 * Undefined means DEFAULT_ROOM_ACCESS_TIER.
+	 */
+	accessTier?: RoomAccessTier;
 }
 
 export interface VaultSyncSettings {
@@ -440,13 +463,43 @@ class RoomInviteModal extends Modal {
 	}
 }
 
+/**
+ * Render the hub-side access-tier picker. Shown on create and edit; the value
+ * is published into the room Y.Doc so every spoke honors it live.
+ */
+function addAccessTierSetting(
+	containerEl: HTMLElement,
+	current: RoomAccessTier,
+	onChange: (tier: RoomAccessTier) => void,
+): void {
+	const setting = new Setting(containerEl)
+		.setName("Spoke access")
+		.setDesc(ROOM_ACCESS_TIER_DESCRIPTIONS[current]);
+	setting.addDropdown((dd) => {
+		for (const tier of ["read-only", "hub-notes", "full"] as RoomAccessTier[]) {
+			dd.addOption(tier, ROOM_ACCESS_TIER_LABELS[tier]);
+		}
+		dd.setValue(current).onChange((value) => {
+			const tier = normalizeRoomAccessTier(value) ?? DEFAULT_ROOM_ACCESS_TIER;
+			setting.setDesc(ROOM_ACCESS_TIER_DESCRIPTIONS[tier]);
+			onChange(tier);
+		});
+	});
+	containerEl.createEl("p", {
+		text: "Enforced by the Lodestone plugin on each spoke, not by the server \u2014 "
+			+ "treat it as a shared agreement between vaults, not a security boundary.",
+		cls: "setting-item-description",
+	});
+}
+
 class CreateRoomModal extends Modal {
 	private roomName = "";
 	private selectedPaths: string[] = [];
-	private onConfirm: (name: string, paths: string[]) => Promise<void>;
+	private accessTier: RoomAccessTier = DEFAULT_ROOM_ACCESS_TIER;
+	private onConfirm: (name: string, paths: string[], tier: RoomAccessTier) => Promise<void>;
 	private pathListEl: HTMLElement | null = null;
 
-	constructor(app: App, onConfirm: (name: string, paths: string[]) => Promise<void>) {
+	constructor(app: App, onConfirm: (name: string, paths: string[], tier: RoomAccessTier) => Promise<void>) {
 		super(app);
 		this.onConfirm = onConfirm;
 	}
@@ -483,6 +536,8 @@ class CreateRoomModal extends Modal {
 		this.pathListEl = contentEl.createDiv({ cls: "lodestone-settings-details-body" });
 		this.renderPathList();
 
+		addAccessTierSetting(contentEl, this.accessTier, (tier) => { this.accessTier = tier; });
+
 		const buttons = contentEl.createDiv({ cls: "modal-button-container" });
 		buttons.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.close());
 		const createBtn = buttons.createEl("button", { text: "Create room", cls: "mod-cta" });
@@ -498,7 +553,7 @@ class CreateRoomModal extends Modal {
 			createBtn.disabled = true;
 			createBtn.textContent = "Creating…";
 			try {
-				await this.onConfirm(this.roomName, [...this.selectedPaths]);
+				await this.onConfirm(this.roomName, [...this.selectedPaths], this.accessTier);
 				this.close();
 			} catch (err) {
 				new Notice(`Failed to create room: ${err instanceof Error ? err.message : String(err)}`, 6000);
@@ -533,18 +588,21 @@ class CreateRoomModal extends Modal {
 class EditRoomModal extends Modal {
 	private roomName: string;
 	private selectedPaths: string[];
-	private onConfirm: (name: string, paths: string[]) => Promise<void>;
+	private accessTier: RoomAccessTier;
+	private onConfirm: (name: string, paths: string[], tier: RoomAccessTier) => Promise<void>;
 	private pathListEl: HTMLElement | null = null;
 
 	constructor(
 		app: App,
 		initialName: string,
 		initialPaths: string[],
-		onConfirm: (name: string, paths: string[]) => Promise<void>,
+		initialTier: RoomAccessTier,
+		onConfirm: (name: string, paths: string[], tier: RoomAccessTier) => Promise<void>,
 	) {
 		super(app);
 		this.roomName = initialName;
 		this.selectedPaths = [...initialPaths];
+		this.accessTier = initialTier;
 		this.onConfirm = onConfirm;
 	}
 
@@ -580,6 +638,8 @@ class EditRoomModal extends Modal {
 		this.pathListEl = contentEl.createDiv({ cls: "lodestone-settings-details-body" });
 		this.renderPathList();
 
+		addAccessTierSetting(contentEl, this.accessTier, (tier) => { this.accessTier = tier; });
+
 		const buttons = contentEl.createDiv({ cls: "modal-button-container" });
 		buttons.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.close());
 		const saveBtn = buttons.createEl("button", { text: "Save changes", cls: "mod-cta" });
@@ -595,7 +655,7 @@ class EditRoomModal extends Modal {
 			saveBtn.disabled = true;
 			saveBtn.textContent = "Saving…";
 			try {
-				await this.onConfirm(this.roomName, [...this.selectedPaths]);
+				await this.onConfirm(this.roomName, [...this.selectedPaths], this.accessTier);
 				this.close();
 			} catch (err) {
 				new Notice(`Failed to save room: ${err instanceof Error ? err.message : String(err)}`, 6000);
@@ -738,6 +798,9 @@ function buildRoomInviteUrl(host: string, token: string, room: RoomConfig): stri
 	if (room.includePaths.length > 0) {
 		params.set("paths", room.includePaths.join(","));
 	}
+	// Carried so the joining spoke honors the tier from its very first edit,
+	// before the room Y.Doc (which is authoritative) has finished syncing.
+	params.set("tier", room.accessTier ?? DEFAULT_ROOM_ACCESS_TIER);
 	return `obsidian://lodestone?${params.toString()}`;
 }
 
@@ -961,6 +1024,25 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 							: "Not configured");
 					addCardRow(card, "Server", roomServer);
 
+					// Shown on both sides, phrased for each: the hub is stating a
+					// rule, the spoke is being told what it may do.
+					const tier = this.plugin.getEffectiveRoomTier(room.roomId);
+					addCardRow(
+						card,
+						room.role === "hub" ? "Spoke access" : "Your access",
+						ROOM_ACCESS_TIER_LABELS[tier],
+					);
+					card.createEl("p", {
+						text: room.role === "hub"
+							? ROOM_ACCESS_TIER_DESCRIPTIONS[tier]
+							: tier === "read-only"
+								? "You can read this room's notes but not change them."
+								: tier === "full"
+									? "You can edit the shared notes and add, rename, or delete your own."
+									: "You can edit the shared notes. Only the host can add, rename, or delete them.",
+						cls: "setting-item-description",
+					});
+
 					if (room.role === "hub" && room.includePaths.length > 0) {
 						const pathList = card.createDiv({ cls: "lodestone-settings-details-body" });
 						for (const p of room.includePaths) {
@@ -997,8 +1079,9 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 								this.app,
 								room.displayName,
 								room.includePaths,
-								async (name, paths) => {
-									await this.plugin.updateRoom(room.roomId, name, paths);
+								this.plugin.getEffectiveRoomTier(room.roomId),
+								async (name, paths, tier) => {
+									await this.plugin.updateRoom(room.roomId, name, paths, tier);
 									this.display();
 								},
 							).open();
@@ -1031,8 +1114,8 @@ export class VaultSyncSettingTab extends PluginSettingTab {
 				createBtn.title = "Hosting a room needs this vault's own host. Deploy a server first.";
 			}
 			createBtn.addEventListener("click", () => {
-				new CreateRoomModal(this.app, async (name, paths) => {
-					await this.plugin.createRoom(name, paths);
+				new CreateRoomModal(this.app, async (name, paths, tier) => {
+					await this.plugin.createRoom(name, paths, tier);
 					this.display();
 				}).open();
 			});

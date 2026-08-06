@@ -5,6 +5,60 @@
 import { isExcluded, isIncluded } from "./sync/exclude";
 
 // -------------------------------------------------------------------
+// Room access tiers
+// -------------------------------------------------------------------
+
+/**
+ * What a spoke is allowed to do in a room. Set by the hub, per room.
+ *
+ * Enforced by the plugin, NOT by the server — the same client-side-only
+ * limitation that applies to the structural write-gate generally (see
+ * lodestone.md). Treat this as coordination between cooperating vaults, never
+ * as a security boundary against a modified client.
+ */
+export type RoomAccessTier =
+	/** Spoke sees live updates but cannot write anything back. */
+	| "read-only"
+	/** Spoke may edit the hub's existing notes, but not create/rename/delete. */
+	| "hub-notes"
+	/** Spoke may also create, rename, and delete notes in the room. */
+	| "full";
+
+/** The tier a room falls back to when neither the hub nor the invite specified one. */
+export const DEFAULT_ROOM_ACCESS_TIER: RoomAccessTier = "hub-notes";
+
+export const ROOM_ACCESS_TIER_LABELS: Record<RoomAccessTier, string> = {
+	"read-only": "Read-only",
+	"hub-notes": "Edit shared notes",
+	full: "Full access",
+};
+
+export const ROOM_ACCESS_TIER_DESCRIPTIONS: Record<RoomAccessTier, string> = {
+	"read-only": "Spokes see changes live but cannot write anything back.",
+	"hub-notes": "Spokes can edit notes you shared, but only you can add, rename, or delete them.",
+	full: "Spokes can also create, rename, and delete notes in this room.",
+};
+
+/**
+ * Narrow an untrusted string (invite param, Y.Doc value) to a known tier.
+ * Returns null for anything unrecognized so callers fall back to the default
+ * rather than treating a garbled value as permissive.
+ */
+export function normalizeRoomAccessTier(value: unknown): RoomAccessTier | null {
+	return value === "read-only" || value === "hub-notes" || value === "full" ? value : null;
+}
+
+/** Whether this tier lets a spoke write note content at all. */
+export function tierAllowsContentWrite(tier: RoomAccessTier): boolean {
+	return tier !== "read-only";
+}
+
+/** Whether this tier lets a spoke create, rename, or delete notes in the room. */
+export function tierAllowsStructuralChange(tier: RoomAccessTier): boolean {
+	return tier === "full";
+}
+
+// -------------------------------------------------------------------
 // Markdown CRDT types
 // -------------------------------------------------------------------
 

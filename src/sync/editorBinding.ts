@@ -1,4 +1,4 @@
-import { Compartment, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { yCollab, ySyncFacet } from "y-codemirror.next";
 import * as Y from "yjs";
@@ -110,6 +110,14 @@ export class EditorBindingManager {
 		debug: boolean,
 		private trace?: TraceRecord,
 		private pathToCrdt: (diskPath: string) => string = (p) => p,
+		/**
+		 * When this returns true, editors bound by this manager are made
+		 * non-editable. Remote updates still flow in and render live — this
+		 * suppresses only local authorship, which is what a read-only room
+		 * needs. Without it, yCollab would happily push the user's keystrokes
+		 * into the shared Y.Text.
+		 */
+		private isReadOnly: () => boolean = () => false,
 	) {
 		this.debug = debug;
 	}
@@ -957,9 +965,17 @@ export class EditorBindingManager {
 			colorLight: "#30bced33",
 		});
 
-		const collabExtension = yCollab(ytext, this.vaultSync.provider.awareness, {
-			undoManager,
-		});
+		const readOnly = this.isReadOnly();
+		const collabExtension: Extension = readOnly
+			? [
+				yCollab(ytext, this.vaultSync.provider.awareness, { undoManager }),
+				// Both are needed: EditorState.readOnly stops programmatic and
+				// input-handler edits, EditorView.editable removes the caret and
+				// the contenteditable affordance so it also *looks* read-only.
+				EditorState.readOnly.of(true),
+				EditorView.editable.of(false),
+			]
+			: yCollab(ytext, this.vaultSync.provider.awareness, { undoManager });
 
 		try {
 			this.clearLocalCursor(`${action}-pre-reconfigure`);

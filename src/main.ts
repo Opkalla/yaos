@@ -1,8 +1,11 @@
 import { MarkdownView, Modal, Notice, Plugin, TFile, arrayBufferToHex, normalizePath } from "obsidian";
 import {
+	DEFAULT_ROOM_ACCESS_TIER,
 	DEFAULT_SETTINGS,
 	VaultSyncSettingTab,
 	generateVaultId,
+	normalizeRoomAccessTier,
+	type RoomAccessTier,
 	type RoomConfig,
 	type VaultSyncSettings,
 } from "./settings";
@@ -21,7 +24,12 @@ import {
 	isUpdateManifest,
 	type UpdateManifest,
 } from "./update/updateManifest";
-import { isMarkdownSyncable, isBlobSyncable } from "./types";
+import {
+	isMarkdownSyncable,
+	isBlobSyncable,
+	tierAllowsContentWrite,
+	tierAllowsStructuralChange,
+} from "./types";
 import { applyDiffToYText } from "./sync/diff";
 import { decideExternalEditImport } from "./sync/externalEditPolicy";
 import {
@@ -99,6 +107,12 @@ const MARKDOWN_DIRTY_SETTLE_MS = 350;
 const OPEN_FILE_EXTERNAL_EDIT_IDLE_GRACE_MS = 1200;
 const BOUND_RECOVERY_LOCK_MS = 1500;
 const CAPABILITY_REFRESH_INTERVAL_MS = 30_000;
+/**
+ * Key under which the hub publishes a room's access tier into the shared `sys`
+ * map. Lives in the Y.Doc rather than each vault's settings so every member of
+ * the room agrees on it and a hub-side change reaches spokes live.
+ */
+const ROOM_ACCESS_TIER_KEY = "roomAccessTier";
 const UPDATE_MANIFEST_URLS = [
 	"https://github.com/austinermish/lodestone/releases/latest/download/update-manifest.json",
 ] as const;
@@ -234,6 +248,8 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 	private statusBarEl: HTMLElement | null = null;
 	private statusInterval: ReturnType<typeof setInterval> | null = null;
 
+	/** Paths already warned about, so a blocked write notifies once, not per keystroke. */
+	private roomWriteBlockedNotices: Set<string> = new Set();
 	private roomSyncs: Map<string, VaultSync> = new Map();
 	private roomDiskMirrors: Map<string, DiskMirror> = new Map();
 	private roomEditorBindings: Map<string, EditorBindingManager> = new Map();
@@ -1704,6 +1720,11 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 					const matchedRoom = this.settings.rooms.find(
 						(r) => this.roomSyncs.get(r.roomId) === roomResult.roomSync,
 					);
+					// Renaming is a structural change — spokes need the "full" tier.
+					if (matchedRoom && !this.canChangeRoomStructure(matchedRoom.roomId)) {
+						this.noticeRoomWriteBlocked(matchedRoom.roomId, file.path, "rename");
+						return;
+					}
 					const aliases = matchedRoom?.pathAliases ?? {};
 					roomResult.roomSync.queueRename(
 						applyReverseAlias(oldPath, aliases),
@@ -1746,6 +1767,14 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 					// Route the delete to the correct VaultSync (room or main vault).
 					const roomResult = this.getRoomSyncAndCrdtPath(file.path);
 					if (roomResult) {
+						// Deleting is a structural change — spokes need the "full" tier.
+						// Without this gate a spoke deleting its local copy would
+						// delete the note for the hub and everyone else.
+						const deleteRoomId = this.findRoomIdForSync(roomResult.roomSync);
+						if (deleteRoomId && !this.canChangeRoomStructure(deleteRoomId)) {
+							this.noticeRoomWriteBlocked(deleteRoomId, file.path, "delete");
+							return;
+						}
 						roomResult.roomSync.handleDelete(roomResult.crdtPath, this.settings.deviceName);
 					} else {
 						this.vaultSync?.handleDelete(file.path, this.settings.deviceName);
@@ -2481,15 +2510,31 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				return;
 			}
 
+			// Access tier gate. The hub always resolves to "full"; only a spoke is
+			// ever restricted here. Enforced client-side only — see lodestone.md.
+			const roomId = roomResult ? this.findRoomIdForSync(roomResult.roomSync) : null;
+
 			const existingText = vaultSync.getTextForPath(crdtPath);
 			if (existingText) {
+				if (roomId && !this.canWriteRoomContent(roomId)) {
+					this.noticeRoomWriteBlocked(roomId, file.path, "edit");
+					await this.updateDiskIndexForPath(file.path);
+					return;
+				}
 				const crdtContent = existingText.toJSON();
 				if (crdtContent !== content) {
 					this.log(`syncFileFromDisk: applying diff to room file "${file.path}"`);
 					applyDiffToYText(existingText, content, "disk-sync");
 				}
 			} else {
-				// New file not yet in the room Y.Doc — seed it now so spokes see it.
+				// New file not yet in the room Y.Doc. Adding one is a structural
+				// change, so it needs the "full" tier — otherwise the file stays
+				// local to this vault and the user is told why.
+				if (roomId && !this.canChangeRoomStructure(roomId)) {
+					this.noticeRoomWriteBlocked(roomId, file.path, "create");
+					await this.updateDiskIndexForPath(file.path);
+					return;
+				}
 				this.log(`syncFileFromDisk: seeding new room file "${file.path}"`);
 				vaultSync.ensureFile(crdtPath, content, this.settings.deviceName);
 			}
@@ -3532,12 +3577,17 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 	// ── Rooms ─────────────────────────────────────────────────────────────
 
 	/** Create a new room as hub. Generates a roomId, saves config, starts room sync. */
-	async createRoom(displayName: string, includePaths: string[]): Promise<RoomConfig> {
+	async createRoom(
+		displayName: string,
+		includePaths: string[],
+		accessTier: RoomAccessTier = DEFAULT_ROOM_ACCESS_TIER,
+	): Promise<RoomConfig> {
 		const room: RoomConfig = {
 			roomId: generateVaultId(),
 			role: "hub",
 			displayName,
 			includePaths,
+			accessTier,
 		};
 		this.settings.rooms = [...this.settings.rooms, room];
 		await this.saveSettings();
@@ -3554,6 +3604,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		hubIncludePaths: string[] = [],
 		host?: string,
 		token?: string,
+		accessTier?: RoomAccessTier,
 	): Promise<void> {
 		if (this.settings.rooms.find((r) => r.roomId === roomId)) {
 			throw new Error("Already in this room.");
@@ -3567,6 +3618,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			...(hubIncludePaths.length > 0 ? { hubIncludePaths } : {}),
 			...(host ? { host } : {}),
 			...(token ? { token } : {}),
+			...(accessTier ? { accessTier } : {}),
 		};
 		this.settings.rooms = [...this.settings.rooms, room];
 		await this.saveSettings();
@@ -3620,6 +3672,8 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			spokeAliases
 				? (diskPath) => applyReverseAlias(diskPath, spokeAliases)
 				: undefined,
+			// Read the tier at bind time, not now — the hub can change it live.
+			() => this.getEffectiveRoomTier(room.roomId) === "read-only",
 		);
 		this.roomEditorBindings.set(room.roomId, roomEditorBindings);
 		// Register the room's CM6 compartment so editors can be bound to it.
@@ -3657,7 +3711,99 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		// freshly-synced Y.Text objects rather than any pre-sync stubs.
 		roomSync.onProviderSync(() => {
 			if (this.reconciled) this.bindAllOpenEditors();
+			// The hub publishes the access tier into the room Y.Doc; do it on
+			// every sync so a room created before tiers existed, or one whose
+			// checkpoint predates the current value, converges.
+			if (isHub) {
+				roomSync.setSharedSetting(
+					ROOM_ACCESS_TIER_KEY,
+					room.accessTier ?? DEFAULT_ROOM_ACCESS_TIER,
+				);
+			}
 		});
+
+		// A spoke honors whatever tier the hub publishes. A change has to
+		// re-bind editors, since read-only is baked into the CM6 extension at
+		// bind time and bind() short-circuits on an otherwise-healthy binding.
+		if (!isHub) {
+			roomSync.onSharedSettingsChange((keys) => {
+				if (!keys.includes(ROOM_ACCESS_TIER_KEY)) return;
+				const tier = this.getEffectiveRoomTier(room.roomId);
+				this.log(`Room "${room.displayName}" access tier is now: ${tier}`);
+				this.trace("trace", "room-access-tier-changed", { roomId: room.roomId, tier });
+				this.roomEditorBindings.get(room.roomId)?.unbindAll();
+				if (this.reconciled) this.bindAllOpenEditors();
+				this.settingTab?.display();
+			});
+		}
+	}
+
+	/**
+	 * The access tier in force for a room right now.
+	 *
+	 * The hub is never gated — it owns the room. For a spoke the room Y.Doc is
+	 * authoritative (so a hub-side change applies live), falling back to what
+	 * the invite carried for the window before the first sync completes, and
+	 * finally to the documented default.
+	 */
+	getEffectiveRoomTier(roomId: string): RoomAccessTier {
+		const room = this.settings.rooms.find((r) => r.roomId === roomId);
+		if (!room) return DEFAULT_ROOM_ACCESS_TIER;
+		if (room.role === "hub") return "full";
+		const published = normalizeRoomAccessTier(
+			this.roomSyncs.get(roomId)?.getSharedSetting(ROOM_ACCESS_TIER_KEY),
+		);
+		return published ?? normalizeRoomAccessTier(room.accessTier) ?? DEFAULT_ROOM_ACCESS_TIER;
+	}
+
+	/**
+	 * Whether this vault may make a structural change (create / rename / delete)
+	 * inside a room. Only "full" grants it to a spoke.
+	 *
+	 * Client-side only, like the rest of the room write-gate — see lodestone.md.
+	 */
+	private canChangeRoomStructure(roomId: string): boolean {
+		return tierAllowsStructuralChange(this.getEffectiveRoomTier(roomId));
+	}
+
+	/** Whether this vault may write note content into a room at all. */
+	private canWriteRoomContent(roomId: string): boolean {
+		return tierAllowsContentWrite(this.getEffectiveRoomTier(roomId));
+	}
+
+	/** Find the room that owns a given room VaultSync instance. */
+	private findRoomIdForSync(roomSync: VaultSync): string | null {
+		for (const [roomId, sync] of this.roomSyncs) {
+			if (sync === roomSync) return roomId;
+		}
+		return null;
+	}
+
+	/**
+	 * Tell the user once per path why something they did in a room went nowhere.
+	 * Silence here is what made spoke-side structural changes feel like a sync
+	 * bug rather than a rule (see PROJECT-PLAN.md 4.8).
+	 */
+	private noticeRoomWriteBlocked(
+		roomId: string,
+		path: string,
+		action: "create" | "rename" | "delete" | "edit",
+	): void {
+		const key = `${roomId}|${path}|${action}`;
+		if (this.roomWriteBlockedNotices.has(key)) return;
+		this.roomWriteBlockedNotices.add(key);
+
+		const room = this.settings.rooms.find((r) => r.roomId === roomId);
+		const roomName = room?.displayName ?? "this room";
+		const tier = this.getEffectiveRoomTier(roomId);
+		const message = tier === "read-only"
+			? `"${roomName}" is read-only. Your change to "${path}" stays on this device.`
+			: action === "create"
+				? `Only the host of "${roomName}" can add notes to it. "${path}" stays on this device.`
+				: `Only the host of "${roomName}" can ${action} notes in it. "${path}" is unchanged for everyone else.`;
+		new Notice(`Lodestone: ${message}`, 8000);
+		this.log(`Room write blocked (${action}, tier=${tier}): "${path}"`);
+		this.trace("trace", "room-write-blocked", { roomId, path, action, tier });
 	}
 
 	/** Stop and destroy a room's sync subsystems. */
@@ -3735,14 +3881,31 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 	}
 
 	/** Update a hub room's display name and shared folders, then restart its sync. */
-	async updateRoom(roomId: string, displayName: string, includePaths: string[]): Promise<void> {
+	async updateRoom(
+		roomId: string,
+		displayName: string,
+		includePaths: string[],
+		accessTier?: RoomAccessTier,
+	): Promise<void> {
 		const idx = this.settings.rooms.findIndex((r) => r.roomId === roomId);
 		if (idx < 0) throw new Error("Room not found.");
 		// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
 		const existing = this.settings.rooms[idx]!;
-		const updated: RoomConfig = { ...existing, displayName, includePaths };
+		const updated: RoomConfig = {
+			...existing,
+			displayName,
+			includePaths,
+			...(accessTier ? { accessTier } : {}),
+		};
 		this.settings.rooms[idx] = updated;
 		await this.saveSettings();
+
+		// Publish the tier before the restart so a connected spoke sees the
+		// change immediately rather than only after the room reconnects.
+		if (updated.role === "hub" && accessTier) {
+			this.roomSyncs.get(roomId)?.setSharedSetting(ROOM_ACCESS_TIER_KEY, accessTier);
+		}
+
 		await this.stopRoomSync(roomId);
 		await this.startRoomSync(updated);
 	}
@@ -3834,8 +3997,14 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		const name = params.get("name")?.trim() ?? "Shared room";
 		const rawPaths = params.get("paths")?.trim() ?? "";
 		const hubIncludePaths = rawPaths ? rawPaths.split(",").map((p) => p.trim()).filter(Boolean) : [];
+		// Untrusted input — normalize, and fall back to the default rather than
+		// treating an unknown value as permissive.
+		const accessTier = normalizeRoomAccessTier(params.get("tier")?.trim())
+			?? DEFAULT_ROOM_ACCESS_TIER;
 
-		await this.handleRoomJoinParams({ roomId, host, token, name, pathAliases, hubIncludePaths });
+		await this.handleRoomJoinParams({
+			roomId, host, token, name, pathAliases, hubIncludePaths, accessTier,
+		});
 	}
 
 	/**
@@ -3855,6 +4024,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		name: string;
 		pathAliases?: Record<string, string>;
 		hubIncludePaths?: string[];
+		accessTier?: RoomAccessTier;
 	}): Promise<void> {
 		if (!p.roomId) throw new Error("Invite link is missing roomId.");
 		if (!p.host || !p.token) throw new Error("Invite link is missing host or token.");
@@ -3882,7 +4052,16 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		}
 
 		// Spoke joins with no includePaths — the room Y.Doc is already scoped by the hub.
-		await this.joinRoom(p.roomId, p.name, [], p.pathAliases ?? {}, p.hubIncludePaths ?? [], p.host, p.token);
+		await this.joinRoom(
+			p.roomId,
+			p.name,
+			[],
+			p.pathAliases ?? {},
+			p.hubIncludePaths ?? [],
+			p.host,
+			p.token,
+			p.accessTier,
+		);
 
 		new Notice(`Joined room "${p.name}". Shared files are syncing.`, 6000);
 		this.settingTab?.display();

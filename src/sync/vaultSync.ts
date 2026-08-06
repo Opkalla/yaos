@@ -367,6 +367,41 @@ export class VaultSync {
 	}
 
 	// -------------------------------------------------------------------
+	// Shared room settings (sys map)
+	// -------------------------------------------------------------------
+
+	/**
+	 * Read a room-level setting published into the shared `sys` map. Used for
+	 * values every member of a room must agree on (e.g. the access tier), which
+	 * therefore have to travel with the document rather than sit in each
+	 * vault's local plugin settings.
+	 */
+	getSharedSetting(key: string): unknown {
+		return this.sys.get(key);
+	}
+
+	/** Publish a room-level setting into the shared `sys` map. Hub-side only. */
+	setSharedSetting(key: string, value: unknown): void {
+		if (this.sys.get(key) === value) return;
+		this.sys.set(key, value);
+		this.log(`Shared setting "${key}" set to ${String(value)}`);
+	}
+
+	/**
+	 * Observe changes to the shared `sys` map. Fires for remote updates too, so
+	 * a spoke learns about a hub-side change without reconnecting.
+	 */
+	onSharedSettingsChange(callback: (changedKeys: string[]) => void): void {
+		this.sys.observe((event) => {
+			const keys: string[] = [];
+			for (const key of event.keysChanged) {
+				if (typeof key === "string") keys.push(key);
+			}
+			if (keys.length > 0) callback(keys);
+		});
+	}
+
+	// -------------------------------------------------------------------
 	// Sentinel
 	// -------------------------------------------------------------------
 

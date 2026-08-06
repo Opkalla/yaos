@@ -1,6 +1,6 @@
 # Multi-vault test plan — 3-person, 2-hub topology
 
-Target version: **3.4.1 or later on every device.** Verify before starting: each
+Target version: **3.5.0 or later on every device.** Verify before starting: each
 person's Obsidian → Lodestone settings shows their plugin version, and the
 status bar shows a room count (`… · 1/1 rooms`) rather than only `CRDT:`.
 
@@ -21,9 +21,9 @@ Every phase below has an isolation check; those are the ones that matter most.
 ## Phase 0 — Baseline (everyone, 5 min)
 
 1. Everyone updates the Lodestone plugin to the same version and **restarts
-   Obsidian** (not just reload — the startup path is what changed in 3.4.1).
+   Obsidian** (not just reload — the startup path changed in 3.4.1).
 2. Everyone confirms in settings: plugin version matches, and the Rooms section
-   is visible.
+   is visible. Each room card should show a "Server" row and an access-tier row.
 3. Austin only: confirm `Connected to Host` with a green badge.
 4. Dad and Noah: put a private note somewhere **outside** any folder that will
    be shared, with recognizable text (e.g. `PRIVATE-dad.md`). This is the
@@ -45,8 +45,8 @@ to Dad and Noah. Each of them joins and picks a local folder for it.
    correct content. Note how long this takes.
 2. **Live text, hub → spokes** — Austin types in an existing note that Dad and
    Noah both have open. It should appear **character by character**, not in
-   chunks a second or two later. Chunky/stutter-y arrival is the 3.4.0 bug and
-   means someone did not update.
+   chunks a second or two later. Chunky/stutter-y arrival is the 3.4.0 bug
+   fixed in 3.4.1 and means someone did not update.
 3. **Cursors, both directions** — Austin should see Dad's and Noah's cursors;
    both of them should see Austin's. Missing cursors on the spoke side is the
    same bug as above.
@@ -60,10 +60,13 @@ to Dad and Noah. Each of them joins and picks a local folder for it.
 7. **Isolation check** — Dad and Noah confirm they see *only* the shared folder's
    contents, and that Austin's other notes are absent. Austin confirms
    `PRIVATE-dad.md` did **not** appear in his vault.
-8. **Structural changes are hub-only** — Austin renames a shared note and
-   deletes another; both propagate. Then Dad creates a note inside his room
-   folder and edits it: it should stay local and **not** reach Austin or Noah.
-   Confirm it is still there after Dad restarts Obsidian.
+8. **Structural changes are hub-only on the default tier** — Austin renames a
+   shared note and deletes another; both propagate. Then Dad creates a note
+   inside his room folder: it should stay local, **not** reach Austin or Noah,
+   and Dad should get a notice telling him only the host can add notes. Confirm
+   it survives a restart on Dad's side. Dad should also try deleting a shared
+   note — it must stay put for Austin and Noah (a spoke delete propagating
+   would be the worst-case bug in this area).
 9. **Restart durability** — Dad and Noah fully quit and reopen Obsidian. The
    room should reconnect on its own, still show `1/1 rooms`, and still be live.
    Repeat check 2 after the restart.
@@ -94,6 +97,39 @@ Noah.
    invite link and catches back up.
 
 ---
+
+## Phase 2b — Access tiers (Austin sets, Dad and Noah feel it)
+
+New in 3.5.0. The hub picks one of three tiers per room; the setting lives in
+Settings → Rooms → Edit on the hub's room card. Every tier change should reach
+the spokes **live**, with no restart and no rejoin.
+
+1. **Default is "Edit shared notes"** — confirm on all three vaults that room 1
+   shows that tier (hub card says "Spoke access", spoke cards say "Your access").
+   This is the behavior already exercised in Phase 1.
+2. **Switch room 1 to Read-only.** Within a few seconds, without restarting:
+   - Dad and Noah should find the shared notes **not editable** — no caret,
+     typing does nothing.
+   - Austin edits a note; both still see it arrive live. Read-only must not mean
+     disconnected.
+   - Both spokes' room cards should now read "Read-only".
+3. **Switch back to "Edit shared notes"** — editing should start working again
+   for both spokes, again without a restart.
+4. **Switch room 1 to Full access.** Now Dad creates a note inside the room
+   folder: it **should** propagate to Austin and Noah. Have Dad rename it, then
+   delete it — both should propagate too.
+5. **Drop back to "Edit shared notes"** with Dad's note still in the room. It
+   stays (it's already shared); Dad should now be blocked from creating a
+   *second* one, with a notice.
+6. **Offline tier change** — Noah quits Obsidian. Austin sets room 1 to
+   Read-only. Noah reopens: he should come back **already** read-only, not
+   editable-then-corrected.
+7. **Per-room independence** — set room 1 and room 2 to *different* tiers and
+   confirm Noah (who is in both) gets each room's rule separately.
+
+Worth noting explicitly: tiers are enforced by the plugin on each spoke, not by
+the server. This test verifies cooperating clients honor the setting; it is not
+a test of a security boundary, and shouldn't be described as one.
 
 ## Phase 3 — Two hubs, peer to peer (Austin ↔ Dad)
 
@@ -148,10 +184,13 @@ the trace log is what makes a vague "it felt laggy" diagnosable afterward.
 
 ## Known limits going in — not bugs
 
-- Within a room, create / rename / move / delete are **hub-only**, and this is
-  enforced in the client, not the server (see `lodestone.md`). A spoke's new
-  notes staying local is correct behavior today.
-- There is no per-spoke permission tier yet; every spoke in a room has the same
-  access. Under discussion, not in this build.
+- Room access tiers are **per room, not per spoke** — every spoke in a room gets
+  the same tier. Per-spoke permissions would need a spoke identity model that
+  doesn't exist today; deliberately not in this build.
+- Tiers (and the host-only structure rule generally) are enforced in the client,
+  not the server (see `lodestone.md`). A modified client could ignore them.
+- A spoke's blocked note stays on its own disk permanently. It does not queue up
+  and propagate later if the tier is raised — the spoke has to touch the file
+  again once it has access.
 - Attachments sync through R2 separately from note text and can lag behind it.
 - Vault size target is ~50 MB; see `engineering/warts-and-limits.md`.
