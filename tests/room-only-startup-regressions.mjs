@@ -99,6 +99,17 @@ assert(
 	roomOnlyMode.includes("bindAllOpenEditors()"),
 	"binds already-open editors so room files are live immediately",
 );
+// 3.4.1: ordering matters. Both rebind hooks inside startRoomSync
+// (seedRoomAndRebindEditors and the onProviderSync callback) are gated on
+// `reconciled`. If rooms start first, those hooks no-op and the spoke stays
+// bound to stub Y.Texts — text arrives only via the DiskMirror (stutter-y,
+// sub-real-time) and remote cursors never render.
+const reconciledAt = roomOnlyMode.indexOf("this.reconciled = true");
+const startRoomsAt = roomOnlyMode.indexOf('startAllRooms("independent")');
+assert(
+	reconciledAt !== -1 && startRoomsAt !== -1 && reconciledAt < startRoomsAt,
+	"reconciled is set BEFORE rooms start (rebind hooks are gated on it)",
+);
 
 console.log("\n--- 3: startAllRooms scoping ---");
 
@@ -145,6 +156,23 @@ assert(
 assert(
 	!updateStatusBar.includes("let text = this.getSyncStatusLabel(state);"),
 	"status bar no longer reports the personal sync label unconditionally",
+);
+
+console.log("\n--- 4b: room editor bindings are audited, not just personal ones ---");
+
+const auditAll = methodBody(mainSrc, "private auditAllEditorBindings(reason: string)") ?? "";
+assert(auditAll !== "", "auditAllEditorBindings() exists");
+assert(
+	auditAll.includes("this.roomEditorBindings.values()"),
+	"the audit covers every room's binding manager (repairs stale stub Y.Texts)",
+);
+assert(
+	roomOnlyMode.includes('auditAllEditorBindings("status-tick")'),
+	"room-only mode ticks the binding audit",
+);
+assert(
+	(initSync ?? "").includes('auditAllEditorBindings("status-tick")'),
+	"the normal startup path ticks the same audit",
 );
 
 console.log("\n--- 5: settings tab shows rooms without a personal connection ---");

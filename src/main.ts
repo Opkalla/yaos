@@ -583,17 +583,25 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		if (!this.statusInterval) {
 			this.statusInterval = setInterval(() => {
 				this.refreshStatusBar();
+				this.auditAllEditorBindings("status-tick");
 			}, 3000);
 			this.register(() => {
 				if (this.statusInterval) clearInterval(this.statusInterval);
 			});
 		}
 
+		// Must be set BEFORE starting rooms. Nothing to reconcile without a
+		// personal Y.Doc, but both of the rebind hooks inside startRoomSync —
+		// seedRoomAndRebindEditors() and the onProviderSync() callback — are
+		// gated on this flag. If it is still false when they fire, the rebind is
+		// skipped and the spoke's editors stay bound to the stub Y.Text objects
+		// that resolveBindingTarget created before the hub's arrived: text then
+		// only reaches the editor via the DiskMirror's debounced file writes
+		// (sub-real-time and stutter-y) and remote cursors never render at all.
+		this.reconciled = true;
+
 		await this.startAllRooms("independent");
 
-		// Nothing to reconcile without a personal Y.Doc, but vault events are
-		// gated on this flag and room files still need to flow disk → CRDT.
-		this.reconciled = true;
 		this.bindAllOpenEditors();
 		this.refreshStatusBar();
 		this.log("Room-only startup complete");
@@ -678,13 +686,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			});
 			this.statusInterval = setInterval(() => {
 				this.refreshStatusBar();
-				if (this.reconciled && this.editorBindings) {
-					const touched = this.editorBindings.auditBindings("status-tick");
-					if (touched > 0) {
-						this.log(`Binding health audit (status-tick) — touched ${touched}`);
-						this.scheduleTraceStateSnapshot("binding-audit:status-tick");
-					}
-				}
+				this.auditAllEditorBindings("status-tick");
 				// Periodically persist blob queue if transfers are active,
 				// or clear persisted queue if transfers completed
 				if (this.blobSync) {
@@ -1435,6 +1437,27 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		}
 
 		target?.bind(view, deviceName);
+	}
+
+	/**
+	 * Run the binding health audit across the personal binding manager AND every
+	 * room's. Room bindings need this at least as much as personal ones: a spoke
+	 * that bound an editor before the hub's Y.Text arrived holds a stub, which
+	 * inspectBindingHealth reports as "ytext-mismatch" and repairs — but only if
+	 * something actually audits it. Before this, only the personal manager was
+	 * ticked, so a stale room binding was repaired solely as a side effect of
+	 * local editor activity.
+	 */
+	private auditAllEditorBindings(reason: string): void {
+		if (!this.reconciled) return;
+		let touched = this.editorBindings?.auditBindings(reason) ?? 0;
+		for (const mgr of this.roomEditorBindings.values()) {
+			touched += mgr.auditBindings(reason);
+		}
+		if (touched > 0) {
+			this.log(`Binding health audit (${reason}) — touched ${touched}`);
+			this.scheduleTraceStateSnapshot(`binding-audit:${reason}`);
+		}
 	}
 
 	private bindAllOpenEditors(): void {
